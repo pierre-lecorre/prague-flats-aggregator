@@ -2,10 +2,16 @@ import asyncio
 import sys
 from typing import List, Dict, Any
 
-from config import SOURCES, DRY_RUN
+from config import (
+    SOURCES, DRY_RUN,
+    MIN_SIZE_M2, MAX_PRICE_CZK,
+    COMMUTE_MAX_MINUTES, COMMUTE_TARGET_ADDRESS,
+    OLLAMA_MODEL
+)
 from db import init_db, listing_exists, insert_listing, get_new_listings, save_evaluation, mark_listing_inactive
-from evaluator import evaluate_listing
+from evaluator import evaluate_flat, check_flatshare, check_auction
 from notifier import send_telegram_message
+from commute import calculate_commute_time_with_address
 
 from scraper_ceskereality import CeskeRealityScraper
 from scraper_ulovdomov import UlovDomovScraper
@@ -19,6 +25,16 @@ SCRAPERS = {
     "realingo": RealingoScraper,
     "sreality": SrealityScraper,
     "bezrealitky": BezrealitkyScraper,
+}
+
+# User criteria for LLM evaluation
+USER_CRITERIA = {
+    "max_price_czk": MAX_PRICE_CZK,
+    "min_sqm": MIN_SIZE_M2,
+    "max_commute_minutes": COMMUTE_MAX_MINUTES,
+    "commute_target": COMMUTE_TARGET_ADDRESS,
+    "min_bedrooms": 1,
+    "preferred_districts": [],  # Add preferred Prague districts here if needed
 }
 
 async def run_scrapers() -> List[Dict[str, Any]]:
@@ -50,30 +66,75 @@ async def process_new_listings():
     for listing in new_listings:
         print(f"Evaluating {listing['url']}...")
         
-        score, reasons, is_flatshare, is_auction, commute_minutes = evaluate_listing(listing)
+        # Check for flatshare and auctions BEFORE LLM evaluation
+        description = listing.get("description", "")
+        title = listing.get("title", "")
+        
+        is_flatshare = check_flatshare(description, title)
+        is_auction, is_city_auction = check_auction(description, title)
+        
+        # Skip city auctions immediately
+        if is_auction and is_city_auction:
+            print(f"  REJECT: City auction - skipping")
+            save_evaluation(
+                listing_id=listing["id"],
+                score=0,
+                reasons="City/municipal auction - ignored",
+                is_flatshare=is_flatshare,
+                is_auction=True,
+                commute_minutes=None
+            )
+            continue
+        
+        # Skip flatshares
+        if is_flatshare:
+            print(f"  REJECT: Flatshare - skipping")
+            save_evaluation(
+                listing_id=listing["id"],
+                score=0,
+                reasons="Flatshare/room rental - ignored",
+                is_flatshare=True,
+                is_auction=False,
+                commute_minutes=None
+            )
+            continue
+        
+        # Calculate commute time
+        commute_minutes = None
+        if listing.get("latitude") and listing.get("longitude"):
+            commute_minutes = calculate_commute_time_with_address(
+                listing["latitude"], 
+                listing["longitude"], 
+                COMMUTE_TARGET_ADDRESS
+            )
+        
+        # Evaluate with LLM (or fallback)
+        score, reason = evaluate_flat(
+            flat=listing,
+            criteria=USER_CRITERIA,
+            model_path=OLLAMA_MODEL
+        )
         
         save_evaluation(
             listing_id=listing["id"],
             score=score,
-            reasons=reasons,
+            reasons=reason,
             is_flatshare=is_flatshare,
             is_auction=is_auction,
             commute_minutes=commute_minutes
         )
         
+        # Skip non-city auctions (but not city auctions - those were already skipped)
         if is_auction:
-            print(f"  Skipping auction: {listing['url']}")
+            print(f"  Skipping auction (non-city): {listing['url']}")
             continue
         
-        if is_flatshare:
-            print(f"  Skipping flatshare: {listing['url']}")
-            continue
-        
+        # Send notification for good matches
         if score >= 60:
             print(f"  Good match (score: {score}) - sending notification")
             await send_telegram_message(listing, {
                 "score": score,
-                "reasons": reasons,
+                "reasons": reason,
                 "commute_minutes": commute_minutes
             })
         else:

@@ -15,6 +15,9 @@ COMMUTE_MAX_MINUTES = int(os.getenv("COMMUTE_MAX_MINUTES", "40"))
 MIN_SIZE_M2 = int(os.getenv("MIN_SIZE_M2", "25"))
 MAX_PRICE_CZK = int(os.getenv("MAX_PRICE_CZK", "20000"))
 
+# Ollama LLM
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")  # or your preferred model
+
 # Run mode
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 

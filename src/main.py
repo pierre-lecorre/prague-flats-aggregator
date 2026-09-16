@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from config import (
     DEFAULT_MONTHLY_FEES_CZK,
     DRY_RUN,
+    ENABLE_LANDOMO,
     MAX_LISTING_AGE_HOURS,
     MIN_SCORE,
     OLLAMA_MODEL,
@@ -22,7 +23,6 @@ from scraper_ulovdomov import UlovDomovScraper
 from scraper_realingo import RealingoScraper
 from scraper_sreality import SrealityScraper
 from scraper_bezrealitky import BezrealitkyScraper
-from scraper_landomo import LandomoScraper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,8 +37,11 @@ SCRAPERS = {
     "realingo": RealingoScraper,
     "sreality": SrealityScraper,
     "bezrealitky": BezrealitkyScraper,
-    "landomo": LandomoScraper,
 }
+if ENABLE_LANDOMO:
+    from scraper_landomo import LandomoScraper
+
+    SCRAPERS["landomo"] = LandomoScraper
 
 
 def _parse_listed_at(raw: Optional[str]) -> Optional[datetime]:

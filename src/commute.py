@@ -10,7 +10,7 @@ https://github.com/pierre-lecorre/landomo-scraper
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import httpx
 
@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 MOTIS_BASE = "https://europe.motis-project.de/api/v1/plan"
 MOTIS_UA = "PragueFlatsAggregator/1.0 (flat-search-tool)"
 MAPY_ROUTE_URL = "https://api.mapy.cz/v1/routing/route"
+MAPY_GEOCODE_URL = "https://api.mapy.cz/v1/geocode"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+
+_GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
 
 
 def _client() -> httpx.Client:
@@ -92,6 +96,103 @@ def _to_minutes(seconds: Optional[float]) -> Optional[float]:
     return round(seconds / 60, 1)
 
 
+def _geocode_queries(address: str) -> List[str]:
+    raw = (address or "").strip()
+    if not raw:
+        return []
+    queries: List[str] = []
+    if "," in raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        street = parts[-1]
+        queries.append(f"{street}, Praha")
+        district = parts[0]
+        for prefix in ("Praha ", "Praha-", "Praha"):
+            if district.lower().startswith(prefix.lower()) and len(district) > len(prefix):
+                district = district[len(prefix):].strip(" -")
+                break
+        if district and district.lower() not in {"praha", "prague"}:
+            queries.append(f"{street}, {district}, Praha")
+    queries.append(raw)
+    if "praha" not in raw.lower() and "prague" not in raw.lower():
+        queries.append(f"{raw}, Praha, Česko")
+    seen = set()
+    out: List[str] = []
+    for query in queries:
+        key = query.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(query)
+    return out
+
+
+def _geocode_address(address: str, mapy_key: Optional[str]) -> Optional[Tuple[float, float]]:
+    for query in _geocode_queries(address):
+        cached = _GEOCODE_CACHE.get(query.lower())
+        if query.lower() in _GEOCODE_CACHE:
+            if cached:
+                return cached
+            continue
+        coords = None
+        if mapy_key:
+            coords = _geocode_mapy(query, mapy_key)
+        if coords is None:
+            coords = _geocode_nominatim(query)
+        _GEOCODE_CACHE[query.lower()] = coords
+        if coords:
+            return coords
+    return None
+
+
+def _geocode_mapy(query: str, mapy_key: str) -> Optional[Tuple[float, float]]:
+    params = {
+        "query": query,
+        "lang": "cs",
+        "limit": 1,
+        "locality": "cz",
+        "apikey": mapy_key,
+    }
+    try:
+        with _client() as client:
+            resp = client.get(MAPY_GEOCODE_URL, params=params)
+            resp.raise_for_status()
+            items = resp.json().get("items") or []
+        if not items:
+            return None
+        pos = items[0].get("position") or {}
+        lon, lat = pos.get("lon"), pos.get("lat")
+        if lat is None or lon is None:
+            return None
+        return float(lat), float(lon)
+    except Exception as exc:
+        logger.warning("Mapy.cz geocode failed: %s", exc)
+        return None
+
+
+def _geocode_nominatim(query: str) -> Optional[Tuple[float, float]]:
+    params = {
+        "q": query,
+        "format": "json",
+        "limit": 1,
+        "countrycodes": "cz",
+    }
+    try:
+        with _client() as client:
+            resp = client.get(
+                NOMINATIM_URL,
+                params=params,
+                headers={"User-Agent": MOTIS_UA},
+            )
+            resp.raise_for_status()
+            items = resp.json() or []
+        if not items:
+            return None
+        return float(items[0]["lat"]), float(items[0]["lon"])
+    except Exception as exc:
+        logger.warning("Nominatim geocode failed: %s", exc)
+        return None
+
+
 def compute_commute_to_flat(
     flat: Dict[str, Any],
     point_a: Optional[Dict[str, float]] = None,
@@ -108,8 +209,14 @@ def compute_commute_to_flat(
     flat_lat = flat.get("latitude") or flat.get("lat")
     flat_lon = flat.get("longitude") or flat.get("lon") or flat.get("lng")
     if flat_lat is None or flat_lon is None:
-        logger.warning("Flat '%s' has no coordinates — skip commute.", flat.get("title"))
-        return None, None
+        geocoded = _geocode_address(str(flat.get("address") or flat.get("title") or ""), key)
+        if geocoded:
+            flat_lat, flat_lon = geocoded
+            flat["latitude"], flat["longitude"] = geocoded
+            logger.info("Geocoded '%s' → %s,%s", flat.get("address") or flat.get("title"), flat_lat, flat_lon)
+        else:
+            logger.warning("Flat '%s' has no coordinates — skip commute.", flat.get("title"))
+            return None, None
 
     dest = {"lat": float(flat_lat), "lon": float(flat_lon)}
 

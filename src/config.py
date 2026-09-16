@@ -60,7 +60,8 @@ DRY_RUN = _env_bool("DRY_RUN", "false")
 # TLS verify. Set HTTP_SSL_VERIFY=false behind corporate SSL intercept.
 HTTP_SSL_VERIFY = os.getenv("HTTP_SSL_VERIFY", "true").lower() not in ("0", "false", "no")
 
-# Landomo search page (Playwright intercepts /api/explore/search)
+# Landomo (Playwright). Off by default — enable later with ENABLE_LANDOMO=true
+ENABLE_LANDOMO = _env_bool("ENABLE_LANDOMO", "false")
 LANDOMO_SEARCH_URL = os.getenv(
     "LANDOMO_SEARCH_URL",
     "https://landomo.cz/en/search?cat=flat&type=rent&pmax=20000&pcur=CZK&amin=25"

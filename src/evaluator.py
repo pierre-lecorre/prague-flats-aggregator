@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from config import HTTP_SSL_VERIFY
+
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = """\
@@ -134,7 +136,7 @@ def _run_llama(model_path: str, prompt: str) -> str:
         },
     }
     try:
-        resp = requests.post(url, json=payload, timeout=120)
+        resp = requests.post(url, json=payload, timeout=120, verify=HTTP_SSL_VERIFY)
         resp.raise_for_status()
         return resp.json().get("response", "").strip()
     except Exception as exc:

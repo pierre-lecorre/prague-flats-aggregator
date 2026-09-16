@@ -1,7 +1,7 @@
 """Landomo.cz scraper via Playwright, same intercept as landomo-scraper.
 
 POST /api/explore/search is Cloudflare-gated (403 without browser attest).
-Navigate the search page, capture that JSON, then fetch descriptions in-page.
+Navigate the search page and capture that JSON.
 https://github.com/pierre-lecorre/landomo-scraper
 """
 

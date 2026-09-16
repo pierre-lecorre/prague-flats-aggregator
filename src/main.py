@@ -4,7 +4,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import (
-    COMMUTE_MAX_MINUTES,
     DRY_RUN,
     MAX_LISTING_AGE_HOURS,
     MIN_SCORE,
@@ -172,21 +171,6 @@ async def process_new_listings():
             commute_a=commute_a,
             commute_b=commute_b,
         )
-
-        if (
-            COMMUTE_MAX_MINUTES
-            and commute_a is not None
-            and commute_b is not None
-            and commute_a > COMMUTE_MAX_MINUTES
-            and commute_b > COMMUTE_MAX_MINUTES
-        ):
-            logger.info(
-                "  SKIP commute: A %.0f and B %.0f > %s min",
-                commute_a,
-                commute_b,
-                COMMUTE_MAX_MINUTES,
-            )
-            continue
 
         logger.info("  Match (score %d) — notify", evaluation.score)
         await send_telegram_message(listing, {

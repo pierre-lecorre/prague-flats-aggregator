@@ -9,7 +9,7 @@ Inspired by [landomo-scraper](https://github.com/pierre-lecorre/landomo-scraper)
 1. **Scrape** — České reality, UlovDomov, Realingo, Sreality, Bezrealitky, plus Landomo (Playwright intercept of `/api/explore/search`). Empty/broken sources Telegram-alert.
 2. **Evaluate** — each new listing goes to Ollama as JSON + your criteria (including free-text notes). Model returns score 0–100 plus flatshare/auction flags.
 3. **Age cut** — listings with a timestamp older than `MAX_LISTING_AGE_HOURS` (default 24h) are stored and skipped.
-4. **Commute** — only for score ≥ `MIN_SCORE`. MOTIS public transit (metro/tram/bus + walk) from **A→flat** and **B→flat**. Optional Mapy.cz walking fallback.
+4. **Commute** — only for score ≥ `MIN_SCORE`. Same as [landomo-scraper](https://github.com/pierre-lecorre/landomo-scraper): MOTIS public transit (metro/tram/bus + walk) A→flat and B→flat, then [Mapy.cz `foot_fast`](https://developer.mapy.com/rest-api-mapy-cz/function/routing/) walking if transit fails (`MAPY_API_KEY`).
 5. **Notify** — Telegram message with title, price, size, both commute times, reason, link.
 
 ## Setup
@@ -27,7 +27,8 @@ Edit `.env`:
 - `COMMUTE_POINT_A` / `COMMUTE_POINT_B` as `lat,lon`
 - `CRITERIA_NOTES` — free-text preferences for the LLM
 - `MIN_SCORE` (default 60)
-- `LANDOMO_SEARCH_URL` — same bounding-box search Landomo uses in the original tool
+- `MAPY_API_KEY` — walking fallback when MOTIS fails ([Mapy routing](https://developer.mapy.com/rest-api-mapy-cz/function/routing/))
+- `LANDOMO_SEARCH_URL` — same bounding-box search as the original Landomo tool
 - `HTTP_SSL_VERIFY=false` only behind a corporate SSL intercept
 
 ```bash

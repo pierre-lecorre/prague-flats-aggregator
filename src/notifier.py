@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN, POINT_A_NAME, POINT_B_NAME
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN, POINT_A_NAME, POINT_B_NAME, HTTP_SSL_VERIFY
 
 
 async def send_telegram_message(listing: Dict[str, Any], evaluation: Dict[str, Any]):
@@ -25,7 +25,7 @@ async def send_telegram_message(listing: Dict[str, Any], evaluation: Dict[str, A
         "disable_web_page_preview": False,
     }
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=HTTP_SSL_VERIFY) as client:
         try:
             response = await client.post(url, json=payload, timeout=30)
             response.raise_for_status()
@@ -54,7 +54,7 @@ async def send_telegram_alert(text: str, parse_mode: Optional[str] = "HTML"):
     if parse_mode:
         payload["parse_mode"] = parse_mode
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(verify=HTTP_SSL_VERIFY) as client:
         try:
             response = await client.post(url, json=payload, timeout=30)
             response.raise_for_status()

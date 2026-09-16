@@ -1,9 +1,11 @@
 import os
+from pathlib import Path
 from typing import Dict, List
 
 from dotenv import load_dotenv
 
-load_dotenv()
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
 
 
 def _env_bool(name: str, default: str = "false") -> bool:
@@ -32,6 +34,8 @@ POINT_B_NAME = os.getenv("COMMUTE_POINT_B_NAME", "Muzeum")
 POINT_B = _env_point("COMMUTE_POINT_B", "50.0796,14.4309")
 COMMUTE_MAX_MINUTES = int(os.getenv("COMMUTE_MAX_MINUTES", "40"))
 MAPY_API_KEY = os.getenv("MAPY_API_KEY", "") or None
+# landomo-scraper uses foot_fast; Mapy has no public-transit routeType
+MAPY_ROUTE_TYPE = os.getenv("MAPY_ROUTE_TYPE", "foot_fast")
 
 # Flat criteria (fed to the LLM)
 MIN_SIZE_M2 = int(os.getenv("MIN_SIZE_M2", "25"))

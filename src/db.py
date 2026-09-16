@@ -1,9 +1,10 @@
 import json
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-DB_PATH = "flats.db"
+DB_PATH = str(Path(__file__).resolve().parent.parent / "flats.db")
 
 
 def _connect():

@@ -70,6 +70,25 @@ def _fmt_commute(minutes) -> str:
     return f"{minutes} min"
 
 
+def _fmt_czk(value) -> str:
+    if value is None or value == "":
+        return "N/A"
+    try:
+        return f"{int(value):,} CZK".replace(",", " ")
+    except (TypeError, ValueError):
+        return f"{value} CZK"
+
+
+def _fee_note(source) -> str:
+    labels = {
+        "extracted": "from listing",
+        "included": "included in rent",
+        "default": "default",
+    }
+    key = str(source or "").strip().lower()
+    return labels.get(key, key or "unknown")
+
+
 def format_message(listing: Dict[str, Any], evaluation: Dict[str, Any]) -> str:
     title = html.escape(str(listing.get("title", "No title")))
     address = html.escape(str(listing.get("address", "N/A")))
@@ -79,11 +98,17 @@ def format_message(listing: Dict[str, Any], evaluation: Dict[str, Any]) -> str:
     score = evaluation.get("score", "N/A")
     commute_a = evaluation.get("commute_a", evaluation.get("commute_minutes"))
     commute_b = evaluation.get("commute_b")
+    price = evaluation.get("price", listing.get("price"))
+    fee = evaluation.get("fee")
+    total = evaluation.get("total")
+    fee_source = html.escape(_fee_note(evaluation.get("fee_source")))
 
     return f"""<b>🏠 Match (score {score}/100)</b>
 
 <b>Title:</b> {title}
-<b>Price:</b> {listing.get("price", "N/A")} CZK
+<b>Price:</b> {_fmt_czk(price)}
+<b>Fees:</b> {_fmt_czk(fee)} ({fee_source})
+<b>Total:</b> {_fmt_czk(total)}
 <b>Size:</b> {listing.get("size_m2", "N/A")} m²
 <b>Address:</b> {address}
 <b>Source:</b> {source}

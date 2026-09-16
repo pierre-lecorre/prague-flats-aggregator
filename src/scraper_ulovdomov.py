@@ -92,4 +92,5 @@ class UlovDomovScraper(BaseScraper):
             latitude=offer.get("lat"),
             longitude=offer.get("lng"),
             listed_at=offer.get("published_at"),
+            listed_fees=int(offer["price_monthly_fee"]) if offer.get("price_monthly_fee") else None,
         )

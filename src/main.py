@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import (
+    DEFAULT_MONTHLY_FEES_CZK,
     DRY_RUN,
     MAX_LISTING_AGE_HOURS,
     MIN_SCORE,
@@ -11,7 +12,7 @@ from config import (
     USER_CRITERIA,
 )
 from db import init_db, listing_exists, insert_listing, get_new_listings, save_evaluation
-from evaluator import evaluate_flat
+from evaluator import Evaluation, evaluate_flat
 from notifier import send_telegram_message, send_telegram_alert
 from commute import compute_commute_to_flat
 from scraper_base import ScrapeError
@@ -54,6 +55,39 @@ def _parse_listed_at(raw: Optional[str]) -> Optional[datetime]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _money(
+    listing: Dict[str, Any],
+    evaluation: Optional[Evaluation] = None,
+) -> Dict[str, Any]:
+    if evaluation is not None:
+        return {
+            "price": evaluation.price,
+            "fee": evaluation.fee,
+            "total": evaluation.total,
+            "fee_source": evaluation.fee_source,
+        }
+    price = listing.get("price")
+    listed = listing.get("listed_fees")
+    try:
+        listed_int = int(listed) if listed is not None else None
+    except (TypeError, ValueError):
+        listed_int = None
+    if listed_int is not None:
+        fee, source = listed_int, "extracted"
+    else:
+        fee, source = DEFAULT_MONTHLY_FEES_CZK, "default"
+    try:
+        price_int = int(price) if price is not None else 0
+    except (TypeError, ValueError):
+        price_int = 0
+    return {
+        "price": price,
+        "fee": fee,
+        "total": price_int + fee,
+        "fee_source": source,
+    }
 
 
 def is_stale(listing: Dict[str, Any]) -> bool:
@@ -118,6 +152,7 @@ async def process_new_listings():
                 reasons=f"Older than {MAX_LISTING_AGE_HOURS}h",
                 is_flatshare=False,
                 is_auction=False,
+                **_money(listing),
             )
             continue
 
@@ -126,6 +161,7 @@ async def process_new_listings():
             criteria=USER_CRITERIA,
             model_path=OLLAMA_MODEL,
         )
+        money = _money(listing, evaluation)
 
         if evaluation.is_city_auction:
             logger.info("  REJECT: City auction")
@@ -135,6 +171,7 @@ async def process_new_listings():
                 reasons=evaluation.reason or "City/municipal auction - ignored",
                 is_flatshare=evaluation.is_flatshare,
                 is_auction=True,
+                **money,
             )
             continue
 
@@ -146,6 +183,7 @@ async def process_new_listings():
                 reasons=evaluation.reason or "Flatshare/room rental - ignored",
                 is_flatshare=True,
                 is_auction=evaluation.is_auction,
+                **money,
             )
             continue
 
@@ -158,6 +196,7 @@ async def process_new_listings():
                 reasons=evaluation.reason,
                 is_flatshare=evaluation.is_flatshare,
                 is_auction=evaluation.is_auction,
+                **money,
             )
             continue
 
@@ -170,14 +209,23 @@ async def process_new_listings():
             is_auction=evaluation.is_auction,
             commute_a=commute_a,
             commute_b=commute_b,
+            **money,
         )
 
-        logger.info("  Match (score %d) — notify", evaluation.score)
+        logger.info(
+            "  Match (score %d) price=%s fee=%s (%s) total=%s — notify",
+            evaluation.score,
+            money["price"],
+            money["fee"],
+            money["fee_source"],
+            money["total"],
+        )
         await send_telegram_message(listing, {
             "score": evaluation.score,
             "reasons": evaluation.reason,
             "commute_a": commute_a,
             "commute_b": commute_b,
+            **money,
         })
         matches += 1
 

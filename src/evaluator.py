@@ -1,7 +1,7 @@
 """Per-flat LLM evaluation via Ollama.
 
-One model call classifies the listing (flatshare / auction / city auction)
-and scores fit against the user's criteria. No keyword or rule fallback.
+One model call classifies the listing (flatshare / auction / city auction),
+scores fit, and extracts monthly fees (or applies the default).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 import requests
 
-from config import HTTP_SSL_VERIFY
+from config import DEFAULT_MONTHLY_FEES_CZK, HTTP_SSL_VERIFY
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,17 @@ Classify:
 - is_city_auction: true only if the seller is a city, municipal district,
   magistrát, or similar public body. Private/developer auctions are false.
 
+Monthly money (CZK):
+- rent = listing.price (nájem). Do not treat deposit, commission, or
+  first/last month as fees.
+- fees = monthly poplatky / zálohy / services / utilities / SVJ charges.
+  If the text or listed_fees states a monthly fee, extract that integer.
+  If rent already includes fees ("včetně poplatků", "vč. poplatků",
+  "including charges"), fee is 0 and fee_source is "included".
+  If fees are not mentioned at all, use default_monthly_fees_czk and
+  fee_source "default".
+- total_czk = rent + fees.
+
 Score 0–100 how well the listing matches the criteria
 (100 = perfect, 0 = fails almost everything).
 Use the free-text notes in criteria as hard preferences.
@@ -41,7 +52,10 @@ Reply with JSON only, no markdown, this schema:
   "reason": "<one or two sentences>",
   "is_flatshare": <true|false>,
   "is_auction": <true|false>,
-  "is_city_auction": <true|false>
+  "is_city_auction": <true|false>,
+  "fee_czk": <integer>,
+  "fee_source": "extracted" | "included" | "default",
+  "total_czk": <integer>
 }}
 
 --- LISTING ---
@@ -59,12 +73,16 @@ class Evaluation:
     is_flatshare: bool = False
     is_auction: bool = False
     is_city_auction: bool = False
+    price: Optional[int] = None
+    fee: int = 0
+    total: int = 0
+    fee_source: str = "default"
 
 
 def _listing_payload(flat: Dict[str, Any]) -> Dict[str, Any]:
     keys = (
         "id", "source", "title", "price", "size_m2", "address", "url",
-        "description", "bedrooms", "district", "listed_at",
+        "description", "bedrooms", "district", "listed_at", "listed_fees",
     )
     payload = {k: flat.get(k) for k in keys}
     desc = payload.get("description") or ""
@@ -79,6 +97,17 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes"}
     return bool(value)
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(float(str(value).replace(" ", "").replace(",", ".")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_json(raw: str) -> Dict[str, Any]:
@@ -98,7 +127,32 @@ def _extract_json(raw: str) -> Dict[str, Any]:
     return data
 
 
-def _parse_evaluation(raw: str) -> Evaluation:
+def _resolve_fees(
+    data: Dict[str, Any],
+    flat: Dict[str, Any],
+    default_fee: int,
+) -> tuple[int, str, int]:
+    price = _as_int(flat.get("price")) or 0
+    source = str(data.get("fee_source") or "").strip().lower()
+    fee = _as_int(data.get("fee_czk"))
+    listed = _as_int(flat.get("listed_fees"))
+
+    if source == "included":
+        return 0, "included", price
+    if listed is not None:
+        return listed, "extracted", price + listed
+    if source == "extracted" and fee is not None and 0 <= fee <= 20000:
+        return fee, "extracted", price + fee
+    if fee is not None and 0 <= fee <= 20000 and source != "default":
+        return fee, "extracted", price + fee
+    return default_fee, "default", price + default_fee
+
+
+def _parse_evaluation(
+    raw: str,
+    flat: Dict[str, Any],
+    default_fee: int,
+) -> Evaluation:
     data = _extract_json(raw)
     try:
         score = int(data.get("score", 0))
@@ -113,12 +167,17 @@ def _parse_evaluation(raw: str) -> Evaluation:
         is_auction = True
     if is_flatshare or is_city_auction:
         score = 0
+    fee, fee_source, total = _resolve_fees(data, flat, default_fee)
     return Evaluation(
         score=score,
         reason=reason,
         is_flatshare=is_flatshare,
         is_auction=is_auction,
         is_city_auction=is_city_auction,
+        price=_as_int(flat.get("price")),
+        fee=fee,
+        total=total,
+        fee_source=fee_source,
     )
 
 
@@ -132,7 +191,7 @@ def _run_llama(model_path: str, prompt: str) -> str:
         "format": "json",
         "options": {
             "temperature": 0.1,
-            "num_predict": 256,
+            "num_predict": 320,
         },
     }
     try:
@@ -144,19 +203,33 @@ def _run_llama(model_path: str, prompt: str) -> str:
         raise
 
 
+def _fallback_evaluation(flat: Dict[str, Any], reason: str) -> Evaluation:
+    price = _as_int(flat.get("price")) or 0
+    listed = _as_int(flat.get("listed_fees"))
+    if listed is not None:
+        fee, source = listed, "extracted"
+    else:
+        fee, source = DEFAULT_MONTHLY_FEES_CZK, "default"
+    return Evaluation(
+        score=0,
+        reason=reason,
+        price=_as_int(flat.get("price")),
+        fee=fee,
+        total=price + fee,
+        fee_source=source,
+    )
+
+
 def evaluate_flat(
     flat: Dict[str, Any],
     criteria: Dict[str, Any],
     model_path: Optional[str] = None,
 ) -> Evaluation:
-    """Score and classify a listing with the LLM.
-
-    Returns ``Evaluation``. On LLM failure, score 0 and all flags false
-    so the pipeline keeps running.
-    """
+    """Score, classify, and price a listing with the LLM."""
+    default_fee = int(criteria.get("default_monthly_fees_czk") or DEFAULT_MONTHLY_FEES_CZK)
     if not model_path:
         logger.error("No Ollama model configured — cannot evaluate.")
-        return Evaluation(score=0, reason="LLM unavailable: no model configured")
+        return _fallback_evaluation(flat, "LLM unavailable: no model configured")
 
     prompt = _PROMPT_TEMPLATE.format(
         flat_json=json.dumps(_listing_payload(flat), ensure_ascii=False, indent=2),
@@ -164,16 +237,16 @@ def evaluate_flat(
     )
     try:
         raw = _run_llama(model_path, prompt)
-        evaluation = _parse_evaluation(raw)
+        evaluation = _parse_evaluation(raw, flat, default_fee)
         logger.debug(
-            "LLM scored '%s' → %d (flatshare=%s auction=%s city=%s)",
+            "LLM scored '%s' → %d fee=%d (%s) total=%d",
             flat.get("title", "?"),
             evaluation.score,
-            evaluation.is_flatshare,
-            evaluation.is_auction,
-            evaluation.is_city_auction,
+            evaluation.fee,
+            evaluation.fee_source,
+            evaluation.total,
         )
         return evaluation
     except Exception:
         logger.exception("LLM evaluation failed for %s", flat.get("url", "?"))
-        return Evaluation(score=0, reason="LLM evaluation failed")
+        return _fallback_evaluation(flat, "LLM evaluation failed")

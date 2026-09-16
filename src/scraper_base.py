@@ -69,6 +69,7 @@ class BaseScraper(ABC):
         listed_at: Optional[str] = None,
         bedrooms: Optional[int] = None,
         district: Optional[str] = None,
+        listed_fees: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         if not url:
             return None
@@ -95,6 +96,7 @@ class BaseScraper(ABC):
             "listed_at": listed_at,
             "bedrooms": bedrooms,
             "district": district,
+            "listed_fees": listed_fees,
         }
 
     def dedupe(self, listings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

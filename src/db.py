@@ -57,11 +57,16 @@ def init_db():
         ("bedrooms", "INTEGER"),
         ("district", "TEXT"),
         ("json_data", "TEXT"),
+        ("listed_fees", "INTEGER"),
     ):
         _add_column(cursor, "listings", col, typedef)
     for col, typedef in (
         ("commute_a", "REAL"),
         ("commute_b", "REAL"),
+        ("price", "INTEGER"),
+        ("fee", "INTEGER"),
+        ("total", "INTEGER"),
+        ("fee_source", "TEXT"),
     ):
         _add_column(cursor, "evaluations", col, typedef)
     conn.commit()
@@ -85,8 +90,8 @@ def insert_listing(listing: Dict[str, Any]):
         INSERT OR REPLACE INTO listings
         (id, source, title, price, size_m2, address, url, description, images,
          latitude, longitude, created_at, updated_at, is_active,
-         listed_at, bedrooms, district, json_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         listed_at, bedrooms, district, json_data, listed_fees)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         listing["id"],
         listing["source"],
@@ -106,6 +111,7 @@ def insert_listing(listing: Dict[str, Any]):
         listing.get("bedrooms"),
         listing.get("district"),
         json.dumps(listing, ensure_ascii=False, default=str),
+        listing.get("listed_fees"),
     ))
     conn.commit()
     conn.close()
@@ -122,7 +128,20 @@ def get_new_listings() -> List[Dict[str, Any]]:
     """)
     rows = cursor.fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+    listings = [dict(row) for row in rows]
+    for listing in listings:
+        if listing.get("listed_fees") is not None:
+            continue
+        raw = listing.get("json_data")
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("listed_fees") is not None:
+            listing["listed_fees"] = data["listed_fees"]
+    return listings
 
 
 def save_evaluation(
@@ -134,6 +153,10 @@ def save_evaluation(
     commute_minutes: Optional[float] = None,
     commute_a: Optional[float] = None,
     commute_b: Optional[float] = None,
+    price: Optional[int] = None,
+    fee: Optional[int] = None,
+    total: Optional[int] = None,
+    fee_source: Optional[str] = None,
 ):
     conn = _connect()
     cursor = conn.cursor()
@@ -143,8 +166,8 @@ def save_evaluation(
     cursor.execute("""
         INSERT INTO evaluations
         (listing_id, score, reasons, is_flatshare, is_auction, commute_minutes,
-         commute_a, commute_b, evaluated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         commute_a, commute_b, price, fee, total, fee_source, evaluated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         listing_id,
         score,
@@ -154,6 +177,10 @@ def save_evaluation(
         commute_minutes,
         commute_a,
         commute_b,
+        price,
+        fee,
+        total,
+        fee_source,
         now,
     ))
     conn.commit()

@@ -119,4 +119,5 @@ class BezrealitkyScraper(BaseScraper):
             description=", ".join(b for b in desc_bits if b),
             latitude=gps.get("lat"),
             longitude=gps.get("lng"),
+            listed_fees=int(item["charges"]) if item.get("charges") is not None else None,
         )

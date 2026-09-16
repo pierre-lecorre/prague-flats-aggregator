@@ -48,6 +48,8 @@ CRITERIA_NOTES = os.getenv(
 )
 MIN_SCORE = int(os.getenv("MIN_SCORE", "60"))
 MAX_LISTING_AGE_HOURS = int(os.getenv("MAX_LISTING_AGE_HOURS", "24"))
+# Monthly utilities / service charges if the listing does not state poplatky
+DEFAULT_MONTHLY_FEES_CZK = int(os.getenv("DEFAULT_MONTHLY_FEES_CZK", "4000"))
 
 # Ollama LLM
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
@@ -84,4 +86,5 @@ USER_CRITERIA = {
     "commute_point_a": f"{POINT_A_NAME} ({POINT_A['lat']},{POINT_A['lon']})",
     "commute_point_b": f"{POINT_B_NAME} ({POINT_B['lat']},{POINT_B['lon']})",
     "notes": CRITERIA_NOTES,
+    "default_monthly_fees_czk": DEFAULT_MONTHLY_FEES_CZK,
 }

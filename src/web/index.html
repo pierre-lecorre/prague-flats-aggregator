@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prague flats</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      --bg: #0f1412;
+      --panel: #18201c;
+      --line: #2a3832;
+      --text: #e8eee9;
+      --muted: #8fa198;
+      --accent: #3dba8b;
+      --warn: #e0b25a;
+      --bad: #e06b5a;
+      --chip: #24302b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+    .tabs { display: flex; gap: 6px; }
+    .tabs button, .filters button {
+      background: var(--chip);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    .tabs button.active, .filters button.active {
+      background: var(--accent);
+      color: #082018;
+      border-color: var(--accent);
+    }
+    main { padding: 16px 20px 40px; }
+    .hidden { display: none !important; }
+    .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+    .layout { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; }
+    @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+    #map { height: 420px; border-radius: 12px; border: 1px solid var(--line); }
+    .cards { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow: auto; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .card h3 { margin: 0 0 6px; font-size: 14px; }
+    .meta, .muted { color: var(--muted); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .pill {
+      font-size: 12px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--chip);
+      border: 1px solid var(--line);
+    }
+    .pill.ok { color: var(--accent); }
+    .pill.warn { color: var(--warn); }
+    .pill.bad { color: var(--bad); }
+    a { color: var(--accent); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .stat b { display: block; font-size: 22px; }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 12px; overflow: hidden; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    .section { margin-top: 22px; }
+    .section h2 { font-size: 15px; margin: 0 0 10px; }
+    .empty-bar { height: 8px; background: #24302b; border-radius: 99px; overflow: hidden; }
+    .empty-bar span { display: block; height: 100%; background: var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Prague flats</h1>
+    <nav class="tabs">
+      <button class="active" data-tab="flats">Flats</button>
+      <button data-tab="pipeline">Pipeline</button>
+    </nav>
+  </header>
+  <main>
+    <section id="tab-flats">
+      <div class="filters" id="filters"></div>
+      <div class="layout">
+        <div id="map"></div>
+        <div class="cards" id="cards"></div>
+      </div>
+    </section>
+    <section id="tab-pipeline" class="hidden">
+      <div class="stats" id="stats"></div>
+      <div class="section">
+        <h2>Last scrape per source</h2>
+        <table id="runs"></table>
+      </div>
+      <div class="section">
+        <h2>Empty fields</h2>
+        <table id="empty"></table>
+      </div>
+      <div class="section">
+        <h2>New last 24h</h2>
+        <table id="newish"></table>
+      </div>
+      <div class="section">
+        <h2>Incomplete listings</h2>
+        <table id="incomplete"></table>
+      </div>
+    </section>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const state = { flats: [], minScore: 60, pointA: "A", pointB: "B", filter: "matches", map: null, markers: [] };
+
+    document.querySelectorAll(".tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const tab = btn.dataset.tab;
+        document.getElementById("tab-flats").classList.toggle("hidden", tab !== "flats");
+        document.getElementById("tab-pipeline").classList.toggle("hidden", tab !== "pipeline");
+        if (tab === "flats" && state.map) state.map.invalidateSize();
+      });
+    });
+
+    function fmtDate(raw, source) {
+      if (!raw) return "n/a";
+      const d = new Date(raw);
+      const when = Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
+      return `${when} (${source === "listed" ? "last edited" : "added"})`;
+    }
+    function fmtCzk(v) {
+      if (v == null || v === "") return "n/a";
+      return `${Number(v).toLocaleString("cs-CZ")} CZK`;
+    }
+    function fmtMin(v) {
+      return v == null || v === "" ? "n/a" : `${v} min`;
+    }
+    function statusOf(flat) {
+      const e = flat.evaluation || {};
+      if (e.is_reserved) return ["reserved", "bad"];
+      if (e.is_unavailable) return ["unavailable", "bad"];
+      if (e.is_flatshare) return ["flatshare", "bad"];
+      if (e.is_auction) return ["auction", "warn"];
+      if ((e.score || 0) >= state.minScore) return ["match", "ok"];
+      if (e.score == null) return ["unevaluated", "warn"];
+      return ["low score", "warn"];
+    }
+    function passes(flat, filter = state.filter) {
+      const e = flat.evaluation || {};
+      const f = filter;
+      if (f === "all") return true;
+      if (f === "matches") return (e.score || 0) >= state.minScore && !e.is_reserved && !e.is_unavailable && !e.is_flatshare;
+      if (f === "reserved") return e.is_reserved || e.is_unavailable;
+      if (f === "incomplete") return (flat.missing_fields || []).length > 0;
+      if (f === "new") {
+        const cut = Date.now() - 24 * 3600 * 1000;
+        const t = new Date(flat.listing_date || flat.created_at).getTime();
+        return t >= cut;
+      }
+      return true;
+    }
+
+    function renderFilters() {
+      const counts = {
+        matches: state.flats.filter((f) => passes(f, "matches")).length,
+        reserved: state.flats.filter((f) => passes(f, "reserved")).length,
+        incomplete: state.flats.filter((f) => passes(f, "incomplete")).length,
+        new: state.flats.filter((f) => passes(f, "new")).length,
+        all: state.flats.length,
+      };
+      const labels = [
+        ["matches", `Matches (${counts.matches})`],
+        ["reserved", `Reserved / gone (${counts.reserved})`],
+        ["incomplete", `Empty fields (${counts.incomplete})`],
+        ["new", `New 24h (${counts.new})`],
+        ["all", `All (${counts.all})`],
+      ];
+      const root = document.getElementById("filters");
+      root.innerHTML = "";
+      labels.forEach(([id, label]) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        if (state.filter === id) b.classList.add("active");
+        b.onclick = () => { state.filter = id; renderFilters(); renderFlats(); };
+        root.appendChild(b);
+      });
+    }
+
+    function renderFlats() {
+      const cards = document.getElementById("cards");
+      cards.innerHTML = "";
+      if (state.map) {
+        state.markers.forEach((m) => m.remove());
+        state.markers = [];
+      }
+      const shown = state.flats.filter(passes);
+      shown.forEach((flat) => {
+        const e = flat.evaluation || {};
+        const [label, klass] = statusOf(flat);
+        const el = document.createElement("article");
+        el.className = "card";
+        el.innerHTML = `
+          <h3>${escapeHtml(flat.title || "Untitled")}</h3>
+          <div class="meta">${escapeHtml(flat.address || "no address")} · ${escapeHtml(flat.source || "")}</div>
+          <div class="row">
+            <span class="pill ${klass}">${label}</span>
+            <span class="pill">score ${e.score ?? "n/a"}</span>
+            <span class="pill">rent ${fmtCzk(e.price ?? flat.price)}</span>
+            <span class="pill">fees ${fmtCzk(e.fee)}</span>
+            <span class="pill">total ${fmtCzk(e.total)}</span>
+          </div>
+          <div class="row">
+            <span class="pill">${escapeHtml(state.pointA)} ${fmtMin(e.commute_a)}</span>
+            <span class="pill">${escapeHtml(state.pointB)} ${fmtMin(e.commute_b)}</span>
+            <span class="pill">${fmtDate(flat.listing_date, flat.listing_date_source)}</span>
+          </div>
+          ${flat.missing_fields?.length ? `<div class="muted">empty: ${flat.missing_fields.join(", ")}</div>` : ""}
+          <div class="muted">${escapeHtml(e.reasons || "")}</div>
+          <div class="row"><a href="${flat.url}" target="_blank" rel="noopener">Open listing</a></div>
+        `;
+        cards.appendChild(el);
+        if (state.map && flat.latitude != null && flat.longitude != null) {
+          const marker = L.marker([flat.latitude, flat.longitude]).addTo(state.map);
+          marker.bindPopup(`<b>${escapeHtml(flat.title || "")}</b><br>${fmtCzk(e.total || flat.price)}`);
+          state.markers.push(marker);
+        }
+      });
+      if (!shown.length) cards.innerHTML = `<div class="muted">No flats in this filter.</div>`;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function renderPipeline(data) {
+      const stats = [
+        ["Listings", data.listings_total],
+        ["Active", data.listings_active],
+        ["Evaluated", data.evaluations_total],
+        ["Unevaluated", data.unevaluated],
+        ["New 24h", data.new_last_24h_count],
+        ["Incomplete", data.incomplete_count],
+      ];
+      document.getElementById("stats").innerHTML = stats.map(([k, v]) =>
+        `<div class="stat"><span class="muted">${k}</span><b>${v ?? 0}</b></div>`
+      ).join("");
+
+      const runs = data.last_runs || [];
+      document.getElementById("runs").innerHTML = `
+        <tr><th>Source</th><th>Finished</th><th>Found</th><th>Inserted</th><th>Error</th></tr>
+        ${runs.length ? runs.map((r) => `<tr>
+          <td>${escapeHtml(r.source)}</td>
+          <td>${escapeHtml(r.finished_at || "")}</td>
+          <td>${r.found ?? 0}</td>
+          <td>${r.inserted ?? 0}</td>
+          <td class="${r.error ? "pill bad" : ""}">${escapeHtml(r.error || "ok")}</td>
+        </tr>`).join("") : "<tr><td colspan=5 class=muted>No pipeline runs yet. Run python src/main.py</td></tr>"}
+      `;
+
+      const empty = Object.entries(data.empty_fields || {});
+      const n = data.listings_total || 1;
+      document.getElementById("empty").innerHTML = `
+        <tr><th>Field</th><th>Empty</th><th></th></tr>
+        ${empty.map(([k, v]) => `<tr>
+          <td>${escapeHtml(k)}</td>
+          <td>${v}</td>
+          <td><div class="empty-bar"><span style="width:${Math.min(100, (v / n) * 100)}%"></span></div></td>
+        </tr>`).join("")}
+      `;
+
+      const news = data.new_last_24h || [];
+      document.getElementById("newish").innerHTML = `
+        <tr><th>Date</th><th>Source</th><th>Title</th><th>Empty</th></tr>
+        ${news.length ? news.map((r) => `<tr>
+          <td>${fmtDate(r.listing_date, r.listing_date_source)}</td>
+          <td>${escapeHtml(r.source || "")}</td>
+          <td><a href="${r.url}" target="_blank">${escapeHtml(r.title || r.id)}</a></td>
+          <td>${(r.missing_fields || []).join(", ") || "—"}</td>
+        </tr>`).join("") : "<tr><td colspan=4 class=muted>Nothing new in last 24h</td></tr>"}
+      `;
+
+      const inc = data.incomplete || [];
+      document.getElementById("incomplete").innerHTML = `
+        <tr><th>Source</th><th>Title</th><th>Missing</th></tr>
+        ${inc.length ? inc.map((r) => `<tr>
+          <td>${escapeHtml(r.source || "")}</td>
+          <td><a href="${r.url}" target="_blank">${escapeHtml(r.title || r.id)}</a></td>
+          <td>${(r.missing_fields || []).join(", ")}</td>
+        </tr>`).join("") : "<tr><td colspan=3 class=muted>All required fields filled</td></tr>"}
+      `;
+    }
+
+    async function boot() {
+      const [flatsRes, pipeRes] = await Promise.all([
+        fetch("/api/flats").then((r) => r.json()),
+        fetch("/api/pipeline").then((r) => r.json()),
+      ]);
+      state.flats = flatsRes.flats || [];
+      state.minScore = flatsRes.min_score || 60;
+      state.pointA = flatsRes.point_a || "A";
+      state.pointB = flatsRes.point_b || "B";
+      state.map = L.map("map").setView([50.08, 14.44], 12);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: "&copy; OSM",
+      }).addTo(state.map);
+      renderFilters();
+      renderFlats();
+      renderPipeline(pipeRes);
+    }
+    boot().catch((err) => {
+      document.getElementById("cards").textContent = "Failed to load: " + err;
+    });
+  </script>
+</body>
+</html>

@@ -60,6 +60,10 @@ DRY_RUN = _env_bool("DRY_RUN", "false")
 # TLS verify. Set HTTP_SSL_VERIFY=false behind corporate SSL intercept.
 HTTP_SSL_VERIFY = os.getenv("HTTP_SSL_VERIFY", "true").lower() not in ("0", "false", "no")
 
+# Local dashboard (127.0.0.1 only)
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.getenv("WEB_PORT", "8765"))
+
 # Landomo (Playwright). Off by default — enable later with ENABLE_LANDOMO=true
 ENABLE_LANDOMO = _env_bool("ENABLE_LANDOMO", "false")
 LANDOMO_SEARCH_URL = os.getenv(

@@ -32,6 +32,12 @@ Edit `.env`:
 - `HTTP_SSL_VERIFY=false` only behind a corporate SSL intercept
 
 ```bash
+./start-web.sh
+```
+
+Opens http://127.0.0.1:8765 — flats map + pipeline tab (new listings, empty fields).
+
+```bash
 cd src
 python main.py
 ```

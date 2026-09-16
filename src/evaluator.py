@@ -29,6 +29,11 @@ Classify:
 - is_auction: true if the listing is an auction / dražba / aukce.
 - is_city_auction: true only if the seller is a city, municipal district,
   magistrát, or similar public body. Private/developer auctions are false.
+- is_reserved: true if the listing says the flat is reserved / under
+  reservation (rezervováno, předběžně rezervováno, currently reserved).
+- is_unavailable: true if already rented, taken, withdrawn, or no longer
+  offered (pronajato, již pronajatý, nedostupné, already rented).
+  A future move-in date alone is NOT unavailable.
 
 Monthly money (CZK):
 - rent = listing.price (nájem). Do not treat deposit, commission, or
@@ -44,7 +49,8 @@ Monthly money (CZK):
 Score 0–100 how well the listing matches the criteria
 (100 = perfect, 0 = fails almost everything).
 Use the free-text notes in criteria as hard preferences.
-Force score to 0 when is_flatshare or is_city_auction is true.
+Force score to 0 when is_flatshare, is_city_auction, is_reserved,
+or is_unavailable is true.
 
 Reply with JSON only, no markdown, this schema:
 {{
@@ -53,6 +59,8 @@ Reply with JSON only, no markdown, this schema:
   "is_flatshare": <true|false>,
   "is_auction": <true|false>,
   "is_city_auction": <true|false>,
+  "is_reserved": <true|false>,
+  "is_unavailable": <true|false>,
   "fee_czk": <integer>,
   "fee_source": "extracted" | "included" | "default",
   "total_czk": <integer>
@@ -73,6 +81,8 @@ class Evaluation:
     is_flatshare: bool = False
     is_auction: bool = False
     is_city_auction: bool = False
+    is_reserved: bool = False
+    is_unavailable: bool = False
     price: Optional[int] = None
     fee: int = 0
     total: int = 0
@@ -163,9 +173,11 @@ def _parse_evaluation(
     is_flatshare = _as_bool(data.get("is_flatshare", False))
     is_auction = _as_bool(data.get("is_auction", False))
     is_city_auction = _as_bool(data.get("is_city_auction", False))
+    is_reserved = _as_bool(data.get("is_reserved", False))
+    is_unavailable = _as_bool(data.get("is_unavailable", False))
     if is_city_auction:
         is_auction = True
-    if is_flatshare or is_city_auction:
+    if is_flatshare or is_city_auction or is_reserved or is_unavailable:
         score = 0
     fee, fee_source, total = _resolve_fees(data, flat, default_fee)
     return Evaluation(
@@ -174,6 +186,8 @@ def _parse_evaluation(
         is_flatshare=is_flatshare,
         is_auction=is_auction,
         is_city_auction=is_city_auction,
+        is_reserved=is_reserved,
+        is_unavailable=is_unavailable,
         price=_as_int(flat.get("price")),
         fee=fee,
         total=total,
@@ -191,7 +205,7 @@ def _run_llama(model_path: str, prompt: str) -> str:
         "format": "json",
         "options": {
             "temperature": 0.1,
-            "num_predict": 320,
+            "num_predict": 400,
         },
     }
     try:

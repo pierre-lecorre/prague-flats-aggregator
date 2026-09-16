@@ -12,7 +12,15 @@ from config import (
     OLLAMA_MODEL,
     USER_CRITERIA,
 )
-from db import init_db, listing_exists, insert_listing, get_new_listings, save_evaluation
+from db import (
+    init_db,
+    listing_exists,
+    insert_listing,
+    get_new_listings,
+    save_evaluation,
+    listing_date,
+    log_pipeline_run,
+)
 from evaluator import Evaluation, evaluate_flat
 from notifier import send_telegram_message, send_telegram_alert
 from commute import compute_commute_to_flat
@@ -96,7 +104,7 @@ def _money(
 def is_stale(listing: Dict[str, Any]) -> bool:
     if not MAX_LISTING_AGE_HOURS:
         return False
-    listed = _parse_listed_at(listing.get("listed_at"))
+    listed = _parse_listed_at(listing_date(listing))
     if listed is None:
         return False
     return datetime.now(timezone.utc) - listed > timedelta(hours=MAX_LISTING_AGE_HOURS)
@@ -109,18 +117,38 @@ async def run_scrapers() -> List[Dict[str, Any]]:
     for source_name, scraper_class in SCRAPERS.items():
         logger.info("Scraping %s...", source_name)
         scraper = scraper_class()
+        started = datetime.utcnow().isoformat()
+        inserted = 0
+        found = 0
         try:
             listings = await scraper.scrape()
-            logger.info("  Found %d listings from %s", len(listings), source_name)
+            found = len(listings)
+            logger.info("  Found %d listings from %s", found, source_name)
             for listing in listings:
                 if not listing_exists(listing["id"]):
                     insert_listing(listing)
                     all_listings.append(listing)
+                    inserted += 1
                 else:
                     logger.debug("  Duplicate: %s", listing["url"])
+            log_pipeline_run(
+                source_name,
+                found=found,
+                inserted=inserted,
+                started_at=started,
+                finished_at=datetime.utcnow().isoformat(),
+            )
         except Exception as e:
             logger.error("Error scraping %s: %s", source_name, e)
             failures.append((source_name, e))
+            log_pipeline_run(
+                source_name,
+                found=found,
+                inserted=inserted,
+                error=str(e),
+                started_at=started,
+                finished_at=datetime.utcnow().isoformat(),
+            )
 
     if failures:
         await alert_scraper_failures(failures)
@@ -165,6 +193,25 @@ async def process_new_listings():
             model_path=OLLAMA_MODEL,
         )
         money = _money(listing, evaluation)
+        flags = {
+            "is_reserved": evaluation.is_reserved,
+            "is_unavailable": evaluation.is_unavailable,
+            "is_city_auction": evaluation.is_city_auction,
+        }
+
+        if evaluation.is_reserved or evaluation.is_unavailable:
+            why = "reserved" if evaluation.is_reserved else "unavailable"
+            logger.info("  REJECT: %s", why)
+            save_evaluation(
+                listing_id=listing["id"],
+                score=0,
+                reasons=evaluation.reason or f"Listing {why}",
+                is_flatshare=evaluation.is_flatshare,
+                is_auction=evaluation.is_auction,
+                **money,
+                **flags,
+            )
+            continue
 
         if evaluation.is_city_auction:
             logger.info("  REJECT: City auction")
@@ -175,6 +222,7 @@ async def process_new_listings():
                 is_flatshare=evaluation.is_flatshare,
                 is_auction=True,
                 **money,
+                **flags,
             )
             continue
 
@@ -187,6 +235,7 @@ async def process_new_listings():
                 is_flatshare=True,
                 is_auction=evaluation.is_auction,
                 **money,
+                **flags,
             )
             continue
 
@@ -200,6 +249,7 @@ async def process_new_listings():
                 is_flatshare=evaluation.is_flatshare,
                 is_auction=evaluation.is_auction,
                 **money,
+                **flags,
             )
             continue
 
@@ -213,6 +263,7 @@ async def process_new_listings():
             commute_a=commute_a,
             commute_b=commute_b,
             **money,
+            **flags,
         )
 
         logger.info(

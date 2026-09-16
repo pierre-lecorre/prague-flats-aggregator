@@ -24,7 +24,7 @@ from db import (
 from evaluator import Evaluation, evaluate_flat
 from notifier import send_telegram_message, send_telegram_alert
 from commute import compute_commute_to_flat
-from scraper_base import ScrapeError
+from scraper_base import ScrapeError, is_fresh_timestamp, parse_listed_at
 
 from scraper_ceskereality import CeskeRealityScraper
 from scraper_ulovdomov import UlovDomovScraper
@@ -52,20 +52,13 @@ if ENABLE_LANDOMO:
     SCRAPERS["landomo"] = LandomoScraper
 
 
-def _parse_listed_at(raw: Optional[str]) -> Optional[datetime]:
-    if not raw:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    text = text.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+def is_stale(listing: Dict[str, Any]) -> bool:
+    if not MAX_LISTING_AGE_HOURS:
+        return False
+    listed = parse_listed_at(listing_date(listing))
+    if listed is None:
+        return False
+    return datetime.now(timezone.utc) - listed > timedelta(hours=MAX_LISTING_AGE_HOURS)
 
 
 def _money(
@@ -101,15 +94,6 @@ def _money(
     }
 
 
-def is_stale(listing: Dict[str, Any]) -> bool:
-    if not MAX_LISTING_AGE_HOURS:
-        return False
-    listed = _parse_listed_at(listing_date(listing))
-    if listed is None:
-        return False
-    return datetime.now(timezone.utc) - listed > timedelta(hours=MAX_LISTING_AGE_HOURS)
-
-
 async def run_scrapers() -> List[Dict[str, Any]]:
     all_listings: List[Dict[str, Any]] = []
     failures: List[Tuple[str, Exception]] = []
@@ -125,6 +109,8 @@ async def run_scrapers() -> List[Dict[str, Any]]:
             found = len(listings)
             logger.info("  Found %d listings from %s", found, source_name)
             for listing in listings:
+                if listing.get("listed_at") and not is_fresh_timestamp(listing["listed_at"]):
+                    continue
                 if not listing_exists(listing["id"]):
                     insert_listing(listing)
                     all_listings.append(listing)

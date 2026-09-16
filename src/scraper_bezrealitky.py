@@ -7,7 +7,12 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from config import MAX_PRICE_CZK, MIN_SIZE_M2
-from scraper_base import BaseScraper, ScrapeError, http_client
+from scraper_base import (
+    BaseScraper,
+    ScrapeError,
+    http_client,
+    listed_at_from_days_active,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,8 @@ query AdvertList(
       charges
       roommate
       gps { lat lng }
+      isNew
+      daysActive
     }
   }
 }
@@ -82,7 +89,7 @@ class BezrealitkyScraper(BaseScraper):
                 "estateType": ["BYT"],
                 "offerType": ["PRONAJEM"],
                 "regionOsmIds": [PRAGUE_OSM_ID],
-                "limit": 50,
+                "limit": 20,
                 "offset": 0,
                 "priceTo": MAX_PRICE_CZK,
                 "surfaceFrom": MIN_SIZE_M2,
@@ -104,9 +111,7 @@ class BezrealitkyScraper(BaseScraper):
                 listings.append(listing)
 
         listings = self.dedupe(listings)
-        if not listings:
-            raise ScrapeError("bezrealitky: parsed 0 listings")
-        logger.info("bezrealitky: %d listings", len(listings))
+        logger.info("bezrealitky: %d fresh listings", len(listings))
         return listings
 
     async def _fetch_graphql(self, payload: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -240,5 +245,9 @@ class BezrealitkyScraper(BaseScraper):
             description=", ".join(b for b in desc_bits if b),
             latitude=gps.get("lat"),
             longitude=gps.get("lng"),
+            listed_at=listed_at_from_days_active(
+                self._pick(item, "daysActive") or item.get("daysActive"),
+                item.get("isNew") or self._pick(item, "isNew"),
+            ),
             listed_fees=int(charges) if charges is not None else None,
         )

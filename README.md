@@ -8,7 +8,7 @@ Inspired by [landomo-scraper](https://github.com/pierre-lecorre/landomo-scraper)
 
 1. **Scrape** — České reality, UlovDomov, Realingo, Sreality, Bezrealitky, plus Landomo (Playwright intercept of `/api/explore/search`). Empty/broken sources Telegram-alert.
 2. **Evaluate** — each new listing goes to Ollama as JSON + your criteria (including free-text notes). Model returns score 0–100 plus flatshare/auction flags.
-3. **Age cut** — listings with a timestamp older than `MAX_LISTING_AGE_HOURS` (default 24h) are stored and skipped.
+3. **Age cut** — only listings added/edited in `MAX_LISTING_AGE_HOURS` (default 24h). Older rows never enter the DB or LLM.
 4. **Commute** — only for score ≥ `MIN_SCORE`. Same as [landomo-scraper](https://github.com/pierre-lecorre/landomo-scraper): MOTIS public transit (metro/tram/bus + walk) A→flat and B→flat, then [Mapy.cz `foot_fast`](https://developer.mapy.com/rest-api-mapy-cz/function/routing/) walking if transit fails (`MAPY_API_KEY`).
 5. **Notify** — Telegram message with title, price, size, both commute times, reason, link.
 

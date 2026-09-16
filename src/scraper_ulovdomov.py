@@ -2,7 +2,7 @@ import logging
 from typing import Any, Dict, List
 
 from config import MAX_PRICE_CZK, MIN_SIZE_M2
-from scraper_base import BaseScraper, ScrapeError, http_client
+from scraper_base import BaseScraper, ScrapeError, freshness_days, http_client
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +23,14 @@ class UlovDomovScraper(BaseScraper):
         payload = {
             "acreage_from": MIN_SIZE_M2 or "",
             "acreage_to": "",
-            "added_before": "",
+            "added_before": freshness_days(),
             "banner_panel_width_type": 480,
             "bounds": PRAGUE_BOUNDS,
             "conveniences": [],
             "dispositions": APARTMENT_DISPOSITIONS,
             "furnishing": [],
             "is_price_commision_free": None,
-            "limit": 50,
+            "limit": 20,
             "offer_type_id": 1,
             "page": 1,
             "price_from": "",
@@ -58,9 +58,7 @@ class UlovDomovScraper(BaseScraper):
                 listings.append(listing)
 
         listings = self.dedupe(listings)
-        if not listings:
-            raise ScrapeError("ulovdomov: parsed 0 listings")
-        logger.info("ulovdomov: %d listings", len(listings))
+        logger.info("ulovdomov: %d fresh listings", len(listings))
         return listings
 
     def _parse_offer(self, offer: Dict[str, Any]):

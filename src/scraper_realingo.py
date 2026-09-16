@@ -40,6 +40,8 @@ query SearchOffer(
       price { total currency }
       area { main }
       location { address latitude longitude }
+      createdAt
+      updatedAt
     }
   }
 }
@@ -76,7 +78,7 @@ class RealingoScraper(BaseScraper):
                 "price": {"from": None, "to": MAX_PRICE_CZK},
                 "area": {"from": MIN_SIZE_M2, "to": None},
                 "sort": "NEWEST",
-                "first": 50,
+                "first": 20,
                 "skip": 0,
             },
         }
@@ -102,9 +104,7 @@ class RealingoScraper(BaseScraper):
                 listings.append(listing)
 
         listings = self.dedupe(listings)
-        if not listings:
-            raise ScrapeError("realingo: parsed 0 listings")
-        logger.info("realingo: %d listings", len(listings))
+        logger.info("realingo: %d fresh listings", len(listings))
         return listings
 
     def _parse_item(self, item: Dict[str, Any]):
@@ -125,4 +125,5 @@ class RealingoScraper(BaseScraper):
             description=", ".join(title_parts),
             latitude=loc.get("latitude"),
             longitude=loc.get("longitude"),
+            listed_at=item.get("updatedAt") or item.get("createdAt"),
         )

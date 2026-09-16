@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List
 from urllib.parse import urljoin
 
-from config import SOURCES
+from config import MAX_LISTING_AGE_HOURS, SOURCES
 from scraper_base import BaseScraper, ScrapeError, http_client
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,14 @@ class SrealityScraper(BaseScraper):
 
     async def scrape(self) -> List[Dict[str, Any]]:
         url = SOURCES["sreality"]
+        if MAX_LISTING_AGE_HOURS and MAX_LISTING_AGE_HOURS <= 24:
+            sep = "&" if "?" in url else "?"
+            if "stari=" not in url:
+                url = f"{url}{sep}stari=dnes"
+        elif MAX_LISTING_AGE_HOURS and MAX_LISTING_AGE_HOURS <= 24 * 8:
+            sep = "&" if "?" in url else "?"
+            if "stari=" not in url:
+                url = f"{url}{sep}stari=tyden"
         async with http_client() as client:
             try:
                 response = await client.get(url)
@@ -61,7 +69,7 @@ class SrealityScraper(BaseScraper):
             if isinstance(key, list) and key and key[0] == "estatesSearch":
                 results = (query.get("state") or {}).get("data", {}).get("results")
                 break
-        if not results:
+        if results is None:
             raise ScrapeError("sreality: estatesSearch results empty")
 
         listings: List[Dict[str, Any]] = []
@@ -71,9 +79,7 @@ class SrealityScraper(BaseScraper):
                 listings.append(listing)
 
         listings = self.dedupe(listings)
-        if not listings:
-            raise ScrapeError("sreality: parsed 0 listings")
-        logger.info("sreality: %d listings", len(listings))
+        logger.info("sreality: %d fresh listings", len(listings))
         return listings
 
     def _parse_item(self, item: Dict[str, Any]):

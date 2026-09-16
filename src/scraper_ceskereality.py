@@ -1,21 +1,18 @@
-import asyncio
 import logging
-import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from bs4 import BeautifulSoup
 
 from config import MAPY_API_KEY, SOURCES
-from scraper_base import BaseScraper, ScrapeError, http_client
+from scraper_base import (
+    BaseScraper,
+    ScrapeError,
+    http_client,
+    parse_czech_relative,
+)
 from commute import _geocode_address
 
 logger = logging.getLogger(__name__)
-
-_COORD_RE = re.compile(
-    r'data-coord-lat="([0-9.]+)"[^>]*data-coord-lng="([0-9.]+)"'
-    r'|[?&]q=([0-9.]+),([0-9.]+)',
-    re.IGNORECASE,
-)
 
 
 class CeskeRealityScraper(BaseScraper):
@@ -44,58 +41,24 @@ class CeskeRealityScraper(BaseScraper):
 
             listings = self.dedupe(listings)
             if not listings:
-                raise ScrapeError("ceskereality: parsed 0 listings")
-            await self._fill_coords(client, listings)
+                logger.info("ceskereality: 0 fresh listings")
+                return listings
+            self._fill_coords(listings)
 
-        logger.info("ceskereality: %d listings", len(listings))
+        logger.info("ceskereality: %d fresh listings", len(listings))
         return listings
 
-    async def _fill_coords(self, client, listings: List[Dict[str, Any]]) -> None:
-        sem = asyncio.Semaphore(2)
-
-        async def one(listing: Dict[str, Any]) -> None:
-            async with sem:
-                coords = await self._coords_from_detail(client, listing["url"])
-                if coords:
-                    listing["latitude"], listing["longitude"] = coords
-                    return
-                geocoded = _geocode_address(
-                    listing.get("address") or listing.get("title") or "",
-                    MAPY_API_KEY,
-                )
-                if geocoded:
-                    listing["latitude"], listing["longitude"] = geocoded
-
-        await asyncio.gather(*(one(item) for item in listings))
+    def _fill_coords(self, listings: List[Dict[str, Any]]) -> None:
+        for listing in listings:
+            geocoded = _geocode_address(
+                listing.get("address") or listing.get("title") or "",
+                MAPY_API_KEY,
+            )
+            if geocoded:
+                listing["latitude"], listing["longitude"] = geocoded
         missing = sum(1 for item in listings if item.get("latitude") is None)
         if missing:
             logger.warning("ceskereality: %d/%d listings still have no GPS", missing, len(listings))
-
-    async def _coords_from_detail(self, client, url: str) -> Optional[Tuple[float, float]]:
-        last_exc = None
-        for attempt in range(1, 4):
-            try:
-                response = await client.get(url)
-                if response.status_code == 429:
-                    last_exc = f"HTTP 429"
-                    await asyncio.sleep(1.5 * attempt)
-                    continue
-                response.raise_for_status()
-            except Exception as exc:
-                last_exc = exc
-                logger.warning("ceskereality detail failed %s: %s", url, exc)
-                return None
-            match = _COORD_RE.search(response.text)
-            if not match:
-                return None
-            lat = match.group(1) or match.group(3)
-            lon = match.group(2) or match.group(4)
-            try:
-                return float(lat), float(lon)
-            except (TypeError, ValueError):
-                return None
-        logger.warning("ceskereality detail gave up %s: %s", url, last_exc)
-        return None
 
     def _parse_card(self, card):
         link = card.select_one("a.i-estate__title-link")
@@ -105,6 +68,7 @@ class CeskeRealityScraper(BaseScraper):
         price_el = card.select_one(".i-estate__footer-price-value")
         desc_el = card.select_one(".i-estate__description-text")
         img = card.select_one("img")
+        listed_at = parse_czech_relative(card.get_text(" ", strip=True))
         return self.make_listing(
             url=link["href"],
             title=title,
@@ -113,6 +77,7 @@ class CeskeRealityScraper(BaseScraper):
             address=self._address_from_title(title),
             description=desc_el.get_text(" ", strip=True) if desc_el else "",
             images=[img["src"]] if img and img.get("src") else [],
+            listed_at=listed_at,
         )
 
     def _address_from_title(self, title: str) -> str:

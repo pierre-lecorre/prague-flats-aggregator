@@ -75,9 +75,7 @@ class LandomoScraper(BaseScraper):
                 listings.append(listing)
 
         listings = self.dedupe(listings)
-        if not listings:
-            raise ScrapeError("landomo: parsed 0 listings")
-        logger.info("landomo: %d listings", len(listings))
+        logger.info("landomo: %d fresh listings", len(listings))
         return listings
 
     def _parse_item(self, item: Dict[str, Any]):

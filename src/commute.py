@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Dict, Optional, Tuple, List
 
 import httpx
@@ -26,6 +27,8 @@ MAPY_GEOCODE_URL = "https://api.mapy.cz/v1/geocode"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
 _GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
+_NOMINATIM_MIN_INTERVAL = 1.2
+_nominatim_last_at = 0.0
 _PRAGUE_CENTROIDS = (
     (50.0755, 14.4378),  # Praha city
     (50.0870, 14.4203),  # Staré Město
@@ -218,27 +221,43 @@ def _geocode_mapy(query: str, mapy_key: str) -> Optional[Tuple[float, float]]:
 
 
 def _geocode_nominatim(query: str) -> Optional[Tuple[float, float]]:
+    global _nominatim_last_at
     params = {
         "q": query,
         "format": "json",
         "limit": 1,
         "countrycodes": "cz",
     }
-    try:
-        with _client() as client:
-            resp = client.get(
-                NOMINATIM_URL,
-                params=params,
-                headers={"User-Agent": MOTIS_UA},
-            )
-            resp.raise_for_status()
-            items = resp.json() or []
-        if not items:
-            return None
-        return float(items[0]["lat"]), float(items[0]["lon"])
-    except Exception as exc:
-        logger.warning("Nominatim geocode failed: %s", exc)
-        return None
+    last_error = None
+    for attempt in range(1, 4):
+        wait = _NOMINATIM_MIN_INTERVAL - (time.monotonic() - _nominatim_last_at)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            with _client() as client:
+                resp = client.get(
+                    NOMINATIM_URL,
+                    params=params,
+                    headers={"User-Agent": MOTIS_UA},
+                )
+                _nominatim_last_at = time.monotonic()
+                if resp.status_code == 429:
+                    retry = float(resp.headers.get("Retry-After") or (2 * attempt))
+                    logger.warning("Nominatim 429 (try %d/3), sleep %.1fs", attempt, retry)
+                    time.sleep(min(max(retry, 2.0), 30.0))
+                    last_error = "429"
+                    continue
+                resp.raise_for_status()
+                items = resp.json() or []
+            if not items:
+                return None
+            return float(items[0]["lat"]), float(items[0]["lon"])
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning("Nominatim geocode failed (try %d/3): %s", attempt, exc)
+            time.sleep(1.5 * attempt)
+    logger.warning("Nominatim gave up for %r: %s", query, last_error)
+    return None
 
 
 def compute_commute_to_flat(

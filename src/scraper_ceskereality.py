@@ -31,6 +31,7 @@ class CeskeRealityScraper(BaseScraper):
     async def scrape(self) -> List[Dict[str, Any]]:
         url = SOURCES["ceskereality"]
         async with http_client() as client:
+            await self._warmup(client)
             response = await self._get_list(client, url)
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -53,16 +54,23 @@ class CeskeRealityScraper(BaseScraper):
         logger.info("ceskereality: %d fresh listings", len(listings))
         return listings
 
+    async def _warmup(self, client: httpx.AsyncClient) -> None:
+        try:
+            await client.get("https://www.ceskereality.cz/", headers=_HTML_HEADERS)
+            await asyncio.sleep(2.0)
+        except Exception as exc:
+            logger.warning("ceskereality homepage warmup failed: %s", exc)
+
     async def _get_list(self, client: httpx.AsyncClient, url: str) -> httpx.Response:
         last_error = None
-        for attempt in range(1, 5):
+        for attempt in range(1, 8):
             try:
                 response = await client.get(url, headers=_HTML_HEADERS)
                 if response.status_code in _RETRY_STATUSES:
                     wait = self._retry_after(response, attempt)
                     last_error = f"HTTP {response.status_code}"
                     logger.warning(
-                        "ceskereality %s (try %d/4), sleep %.1fs",
+                        "ceskereality %s (try %d/7), sleep %.1fs",
                         last_error,
                         attempt,
                         wait,
@@ -79,18 +87,22 @@ class CeskeRealityScraper(BaseScraper):
                 raise ScrapeError(f"ceskereality HTTP failed: {exc}") from exc
             except Exception as exc:
                 last_error = str(exc)
-                logger.warning("ceskereality HTTP error (try %d/4): %s", attempt, exc)
-                await asyncio.sleep(1.5 * attempt)
+                logger.warning("ceskereality HTTP error (try %d/7): %s", attempt, exc)
+                await asyncio.sleep(2.0 * attempt)
         raise ScrapeError(f"ceskereality HTTP failed: {last_error}")
 
     @staticmethod
     def _retry_after(response: httpx.Response, attempt: int) -> float:
         raw = response.headers.get("Retry-After")
         try:
-            wait = float(raw) if raw else 1.5 * attempt
+            header = float(raw) if raw else 0.0
         except ValueError:
-            wait = 1.5 * attempt
-        return min(max(wait, 1.0), 20.0)
+            header = 0.0
+        if response.status_code == 429:
+            wait = max(header, 20.0 * attempt)
+        else:
+            wait = header or (2.5 * attempt)
+        return min(max(wait, 2.0), 90.0)
 
     def _fill_coords(self, listings: List[Dict[str, Any]]) -> None:
         for listing in listings:

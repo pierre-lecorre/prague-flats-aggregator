@@ -75,7 +75,23 @@
     label.ctrl input[type=range] { width: 160px; }
     label.ctrl b { color: var(--text); font-size: 13px; }
     .check { display: inline-flex; align-items: center; gap: 6px; }
-    #map { height: 300px; border-radius: 14px; border: 1px solid var(--line); margin-bottom: 16px; }
+    #map { height: 460px; border-radius: 14px; border: 1px solid var(--line); margin-bottom: 16px; }
+    .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+      background: #151b20;
+      color: var(--text);
+      box-shadow: 0 10px 30px rgba(0,0,0,.45);
+    }
+    .leaflet-popup-content { margin: 0; width: 260px !important; }
+    .leaflet-container a.leaflet-popup-close-button { color: var(--muted); }
+    .map-flat-photo {
+      height: 128px;
+      background: #0f1614 center/cover no-repeat;
+    }
+    .map-flat-photo.empty { display: grid; place-items: center; color: var(--muted); background: #1a2220; height: 72px; }
+    .map-flat-body { padding: 10px 12px 12px; display: grid; gap: 5px; }
+    .map-flat-body b { font-size: 14px; line-height: 1.3; }
+    .map-flat-body .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #0c1012; font-size: 11px; }
+    .card.focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(61,186,139,.35); }
     .cards {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -232,7 +248,7 @@
     const state = {
       flats: [], minScore: 60, maxPrice: 20000, maxTime: 40, maxAge: 24,
       pointA: "A", pointB: "B", filter: "matches", hideGone: true,
-      map: null, markers: []
+      map: null, markers: [], markerById: {}, selectedId: null
     };
 
     document.querySelectorAll(".tabs button").forEach((btn) => {
@@ -362,12 +378,59 @@
       });
     }
 
+    function flatDomId(id) {
+      return "flat-" + String(id || "").replace(/[^a-zA-Z0-9_-]/g, "_");
+    }
+    function markerColor(klass) {
+      if (klass === "ok") return "#3dba8b";
+      if (klass === "bad") return "#e06b5a";
+      return "#e0b25a";
+    }
+    function popupHtml(flat) {
+      const e = flat.evaluation || {};
+      const [label, klass] = statusOf(flat);
+      const img = (flat.images || [])[0];
+      const photo = img
+        ? `<div class="map-flat-photo" style="background-image:url('${String(img).replace(/'/g, "%27")}')"></div>`
+        : `<div class="map-flat-photo empty">no photo</div>`;
+      return `<div class="map-flat">
+        ${photo}
+        <div class="map-flat-body">
+          <span class="badge ${klass}">${escapeHtml(label)} · ${e.score ?? "–"}</span>
+          <b>${escapeHtml(flat.title || "Untitled")}</b>
+          <div class="meta">${escapeHtml(flat.address || "no address")} · ${escapeHtml(flat.source || "")}</div>
+          <div class="price">${fmtCzk(rentOf(flat))}</div>
+          <div class="row">
+            <span class="pill">${escapeHtml(flat.size_m2 ? `${flat.size_m2} m²` : "size n/a")}</span>
+            <span class="pill">${escapeHtml(state.pointA)} ${fmtMin(e.commute_a)}</span>
+            <span class="pill">${escapeHtml(state.pointB)} ${fmtMin(e.commute_b)}</span>
+          </div>
+          <a href="${escapeHtml(flat.url || "#")}" target="_blank" rel="noopener">Open listing</a>
+        </div>
+      </div>`;
+    }
+    function highlightFlat(id, openPopup) {
+      document.querySelectorAll(".card.focus").forEach((el) => el.classList.remove("focus"));
+      const card = document.getElementById(flatDomId(id));
+      if (card) {
+        card.classList.add("focus");
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      const marker = state.markerById[id];
+      if (openPopup && marker && state.map) {
+        marker.openPopup();
+        state.map.panTo(marker.getLatLng());
+      }
+      state.selectedId = id;
+    }
+
     function renderFlats() {
       const cards = document.getElementById("cards");
       cards.innerHTML = "";
       if (state.map) {
         state.markers.forEach((m) => m.remove());
         state.markers = [];
+        state.markerById = {};
       }
       const shown = state.flats.filter(passes);
       document.getElementById("resultCount").textContent = `${shown.length} flats`;
@@ -377,6 +440,7 @@
         const img = (flat.images || [])[0];
         const el = document.createElement("article");
         el.className = "card";
+        el.id = flatDomId(flat.id);
         el.innerHTML = `
           <div class="photo ${img ? "" : "empty"}" ${img ? `style="background-image:url('${img.replace(/'/g, "%27")}')"` : ""}>
             ${img ? "" : "no photo"}
@@ -397,13 +461,29 @@
             <div><a href="${flat.url}" target="_blank" rel="noopener">Open listing</a></div>
           </div>
         `;
+        el.addEventListener("click", (ev) => {
+          if (ev.target.closest("a")) return;
+          highlightFlat(flat.id, true);
+        });
         cards.appendChild(el);
         if (state.map && flat.latitude != null && flat.longitude != null) {
-          const marker = L.marker([flat.latitude, flat.longitude]).addTo(state.map);
-          marker.bindPopup(`<b>${escapeHtml(flat.title || "")}</b><br>${fmtCzk(rentOf(flat))}`);
+          const color = markerColor(klass);
+          const marker = L.circleMarker([flat.latitude, flat.longitude], {
+            radius: 9,
+            color,
+            weight: 2,
+            fillColor: color,
+            fillOpacity: 0.92,
+          }).addTo(state.map);
+          marker.bindPopup(popupHtml(flat), { maxWidth: 280, className: "flat-popup" });
+          marker.on("click", () => highlightFlat(flat.id, false));
           state.markers.push(marker);
+          state.markerById[flat.id] = marker;
         }
       });
+      if (state.map && state.markers.length) {
+        state.map.fitBounds(L.featureGroup(state.markers).getBounds().pad(0.14), { maxZoom: 13 });
+      }
       if (!shown.length) cards.innerHTML = `<div class="meta">No flats for these filters.</div>`;
     }
 
@@ -527,7 +607,9 @@
       document.getElementById("minScore").max = 100;
       document.getElementById("maxPrice").max = Math.max(40000, state.maxPrice);
       state.map = L.map("map").setView([50.08, 14.44], 12);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OSM" }).addTo(state.map);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        attribution: "&copy; OSM &copy; CARTO",
+      }).addTo(state.map);
       bindControls();
       renderChips();
       renderFlats();

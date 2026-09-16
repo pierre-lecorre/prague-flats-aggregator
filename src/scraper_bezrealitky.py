@@ -69,6 +69,7 @@ query AdvertList(
       gps { lat lng }
       isNew
       daysActive
+      mainImage { url }
     }
   }
 }
@@ -236,6 +237,10 @@ class BezrealitkyScraper(BaseScraper):
         charges = item.get("charges")
         if charges:
             desc_bits.append(f"poplatky {charges} CZK")
+        images = []
+        main = item.get("mainImage")
+        if isinstance(main, dict) and main.get("url"):
+            images.append(main["url"])
         return self.make_listing(
             url=f"{self.base_url}/nemovitosti-byty-domy/{uri}",
             title=title,
@@ -243,6 +248,7 @@ class BezrealitkyScraper(BaseScraper):
             size_m2=float(item["surface"]) if item.get("surface") else None,
             address=address,
             description=", ".join(b for b in desc_bits if b),
+            images=images,
             latitude=gps.get("lat"),
             longitude=gps.get("lng"),
             listed_at=listed_at_from_days_active(

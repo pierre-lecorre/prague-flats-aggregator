@@ -1,8 +1,17 @@
 import json
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from config import (
+    COMMUTE_MAX_MINUTES,
+    MAX_LISTING_AGE_HOURS,
+    MAX_PRICE_CZK,
+    MIN_SCORE,
+    MIN_SIZE_M2,
+)
+from scraper_base import parse_listed_at
 
 DB_PATH = str(Path(__file__).resolve().parent.parent / "flats.db")
 
@@ -251,6 +260,109 @@ def _is_empty(value: Any) -> bool:
     return False
 
 
+def _as_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_image_url(url: str) -> str:
+    text = str(url).strip()
+    if text.startswith("//"):
+        return "https:" + text
+    return text
+
+
+PRAGUE_LAT = (49.94, 50.18)
+PRAGUE_LON = (14.22, 14.72)
+
+
+def listing_quality_issues(
+    listing: Dict[str, Any],
+    evaluation: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    """Concrete data-quality findings for one listing."""
+    issues: List[Dict[str, str]] = []
+
+    def add(severity: str, code: str, message: str) -> None:
+        issues.append({"severity": severity, "code": code, "message": message})
+
+    for field in LISTING_REQUIRED_FIELDS:
+        if _is_empty(listing.get(field)):
+            severity = "error" if field in {"title", "price", "url"} else "warn"
+            add(severity, f"empty_{field}", f"Missing {field}")
+
+    images = listing.get("images") or []
+    if not images:
+        add("warn", "no_image", "No photo")
+
+    desc = str(listing.get("description") or "")
+    if desc and len(desc.strip()) < 40:
+        add("warn", "thin_description", f"Description only {len(desc.strip())} chars")
+
+    price = _as_float(listing.get("price"))
+    if price is not None:
+        if price < 5000:
+            add("error", "price_too_low", f"Rent {int(price)} CZK looks like a room/error")
+        if MAX_PRICE_CZK and price > MAX_PRICE_CZK:
+            add("error", "price_over_cap", f"Rent {int(price)} CZK over cap {MAX_PRICE_CZK}")
+
+    size = _as_float(listing.get("size_m2"))
+    if size is not None:
+        if size < MIN_SIZE_M2:
+            add("error", "size_below_min", f"{size} m² below min {MIN_SIZE_M2}")
+        if size > 180:
+            add("warn", "size_huge", f"{size} m² unusually large for this search")
+
+    lat = _as_float(listing.get("latitude"))
+    lon = _as_float(listing.get("longitude"))
+    if lat is not None and lon is not None:
+        if not (PRAGUE_LAT[0] <= lat <= PRAGUE_LAT[1] and PRAGUE_LON[0] <= lon <= PRAGUE_LON[1]):
+            add("error", "gps_outside_prague", f"GPS {lat:.4f},{lon:.4f} outside Prague bbox")
+        if abs(lat) < 0.01 and abs(lon) < 0.01:
+            add("error", "gps_null_island", "GPS is 0,0")
+
+    listed = listing.get("listed_at") or listing.get("listing_date")
+    if listed:
+        dt = parse_listed_at(listed)
+        if dt is None:
+            add("warn", "bad_listed_at", f"Unparseable listed_at {listed!r}")
+        else:
+            age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+            if age_h < -1:
+                add("error", "listed_in_future", f"listed_at is {-age_h:.1f}h in the future")
+            elif MAX_LISTING_AGE_HOURS and age_h > MAX_LISTING_AGE_HOURS + 0.5:
+                add("warn", "stale_listing", f"Listed {age_h:.0f}h ago (cap {MAX_LISTING_AGE_HOURS}h)")
+
+    if evaluation:
+        ev_price = _as_float(evaluation.get("price"))
+        fee = _as_float(evaluation.get("fee"))
+        total = _as_float(evaluation.get("total"))
+        if ev_price is not None and fee is not None and total is not None:
+            if abs((ev_price + fee) - total) > 1:
+                add("error", "total_mismatch", f"total {int(total)} != rent {int(ev_price)} + fee {int(fee)}")
+        reserved = bool(evaluation.get("is_reserved") or evaluation.get("is_unavailable"))
+        score = _as_float(evaluation.get("score"))
+        if reserved and score and score >= MIN_SCORE:
+            add("error", "reserved_high_score", "Reserved/unavailable but score still high")
+        is_match = bool(score and score >= MIN_SCORE and not reserved and not evaluation.get("is_flatshare"))
+        if is_match:
+            if _is_empty(evaluation.get("commute_a")) or _is_empty(evaluation.get("commute_b")):
+                add("error", "match_no_commute", "Match missing commute")
+            commute_a = _as_float(evaluation.get("commute_a"))
+            commute_b = _as_float(evaluation.get("commute_b"))
+            if commute_a is not None and commute_a > COMMUTE_MAX_MINUTES * 2:
+                add("warn", "commute_a_extreme", f"Commute A {commute_a} min")
+            if commute_b is not None and commute_b > COMMUTE_MAX_MINUTES * 2:
+                add("warn", "commute_b_extreme", f"Commute B {commute_b} min")
+            if not images:
+                add("warn", "match_no_image", "Match has no photo")
+    return issues
+
+
 def missing_fields(listing: Dict[str, Any], evaluation: Optional[Dict[str, Any]] = None) -> List[str]:
     missing = [name for name in LISTING_REQUIRED_FIELDS if _is_empty(listing.get(name))]
     if evaluation:
@@ -268,22 +380,60 @@ def missing_fields(listing: Dict[str, Any], evaluation: Optional[Dict[str, Any]]
 
 
 def _parse_images(raw: Any) -> List[str]:
+    urls: List[str] = []
+    items: List[Any] = []
+    if not raw:
+        items = []
+    elif isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, dict):
+        items = [raw]
+    else:
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            data = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = [data]
+        else:
+            items = []
+    for item in items:
+        url = None
+        if isinstance(item, str):
+            url = item
+        elif isinstance(item, dict):
+            url = item.get("url") or item.get("path") or item.get("src")
+        if url and str(url).startswith(("http://", "https://", "//")):
+            urls.append(_normalize_image_url(url))
+    return urls
+
+
+def _images_from_json_data(raw: Any) -> List[str]:
     if not raw:
         return []
-    if isinstance(raw, list):
-        return [str(x) for x in raw if x]
-    try:
-        data = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        return []
-    if isinstance(data, list):
-        return [str(x) for x in data if x]
+    data = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return []
+    if not isinstance(data, dict):
+        return _parse_images(data)
+    for key in ("images", "photos", "mainImage", "image", "photo"):
+        found = _parse_images(data.get(key))
+        if found:
+            return found
     return []
 
 
 def _decorate_listing(row: Dict[str, Any]) -> Dict[str, Any]:
     listing = dict(row)
-    listing["images"] = _parse_images(listing.get("images"))
+    images = _parse_images(listing.get("images"))
+    if not images:
+        images = _images_from_json_data(listing.get("json_data"))
+    listing["images"] = images
     listing["listing_date"] = listing_date(listing)
     listing["listing_date_source"] = listing_date_source(listing)
     evaluation = {
@@ -304,6 +454,10 @@ def _decorate_listing(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     listing["evaluation"] = evaluation
     listing["missing_fields"] = missing_fields(listing, evaluation)
+    listing["quality_issues"] = listing_quality_issues(listing, evaluation)
+    listing["quality_errors"] = sum(1 for i in listing["quality_issues"] if i["severity"] == "error")
+    listing["quality_warns"] = sum(1 for i in listing["quality_issues"] if i["severity"] == "warn")
+    listing.pop("json_data", None)
     return listing
 
 
@@ -419,14 +573,23 @@ def get_pipeline_snapshot() -> Dict[str, Any]:
 
     flats = get_flats(limit=500)
     field_counts: Dict[str, int] = {name: 0 for name in LISTING_REQUIRED_FIELDS}
+    field_counts["images"] = 0
     incomplete = []
     new_items = []
+    quality_rows = []
     generated_at = datetime.utcnow().isoformat()
     recent_cut = (datetime.utcnow() - timedelta(hours=24)).isoformat()
+    issue_counts: Dict[str, int] = {}
+    error_n = 0
+    warn_n = 0
+    gps_seen: Dict[str, List[str]] = {}
+    url_seen: Dict[str, List[str]] = {}
     for flat in flats:
         missing = flat.get("missing_fields") or []
         for name in missing:
             field_counts[name] = field_counts.get(name, 0) + 1
+        if not (flat.get("images") or []):
+            field_counts["images"] = field_counts.get("images", 0) + 1
         if missing:
             incomplete.append({
                 "id": flat.get("id"),
@@ -453,6 +616,111 @@ def get_pipeline_snapshot() -> Dict[str, Any]:
                 "is_reserved": (flat.get("evaluation") or {}).get("is_reserved"),
                 "is_unavailable": (flat.get("evaluation") or {}).get("is_unavailable"),
             })
+        issues = flat.get("quality_issues") or []
+        if issues:
+            quality_rows.append({
+                "id": flat.get("id"),
+                "source": flat.get("source"),
+                "title": flat.get("title"),
+                "url": flat.get("url"),
+                "errors": [i for i in issues if i["severity"] == "error"],
+                "warns": [i for i in issues if i["severity"] == "warn"],
+            })
+        for issue in issues:
+            issue_counts[issue["code"]] = issue_counts.get(issue["code"], 0) + 1
+            if issue["severity"] == "error":
+                error_n += 1
+            else:
+                warn_n += 1
+        lat = flat.get("latitude")
+        lon = flat.get("longitude")
+        if lat is not None and lon is not None:
+            key = f"{round(float(lat), 4)},{round(float(lon), 4)}"
+            gps_seen.setdefault(key, []).append(flat.get("id") or "")
+        url = (flat.get("url") or "").split("?")[0]
+        if url:
+            url_seen.setdefault(url, []).append(flat.get("id") or "")
+
+    duplicate_gps = [
+        {"gps": gps, "count": len(ids), "ids": ids[:8]}
+        for gps, ids in gps_seen.items()
+        if len(ids) >= 3
+    ]
+    duplicate_urls = [
+        {"url": url, "count": len(ids), "ids": ids[:8]}
+        for url, ids in url_seen.items()
+        if len(ids) >= 2
+    ]
+
+    alerts = []
+    now = datetime.now(timezone.utc)
+    for run in last_runs:
+        if run.get("error"):
+            alerts.append({
+                "severity": "error",
+                "code": "source_error",
+                "message": f"{run['source']}: {run['error']}",
+            })
+        if (run.get("found") or 0) == 0 and not run.get("error"):
+            alerts.append({
+                "severity": "warn",
+                "code": "source_empty",
+                "message": f"{run['source']}: last scrape found 0 listings",
+            })
+        finished = run.get("finished_at")
+        if finished:
+            try:
+                dt = datetime.fromisoformat(str(finished).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                age_min = (now - dt.astimezone(timezone.utc)).total_seconds() / 60
+                if age_min > 120:
+                    alerts.append({
+                        "severity": "warn",
+                        "code": "source_stale_run",
+                        "message": f"{run['source']}: last scrape {age_min:.0f} min ago",
+                    })
+            except ValueError:
+                pass
+    if unevaluated:
+        alerts.append({
+            "severity": "warn",
+            "code": "eval_backlog",
+            "message": f"{unevaluated} listings waiting for LLM",
+        })
+    enabled = {"ceskereality", "ulovdomov", "realingo", "sreality", "bezrealitky"}
+    seen_sources = {row["source"] for row in last_runs}
+    for name in sorted(enabled - seen_sources):
+        alerts.append({
+            "severity": "warn",
+            "code": "source_never_ran",
+            "message": f"{name}: no pipeline run logged",
+        })
+    if duplicate_urls:
+        alerts.append({
+            "severity": "warn",
+            "code": "duplicate_urls",
+            "message": f"{len(duplicate_urls)} URLs appear on more than one listing",
+        })
+    if duplicate_gps:
+        alerts.append({
+            "severity": "warn",
+            "code": "duplicate_gps",
+            "message": f"{len(duplicate_gps)} GPS clusters with ≥3 listings",
+        })
+    if error_n:
+        alerts.append({
+            "severity": "error",
+            "code": "listing_quality_errors",
+            "message": f"{error_n} listing quality errors across {len(quality_rows)} listings",
+        })
+
+    health = 100
+    health -= min(40, error_n * 2)
+    health -= min(20, warn_n)
+    health -= min(15, len(alerts) * 3)
+    health -= min(10, unevaluated * 2)
+    health = max(0, health)
 
     return {
         "listings_total": listings_total,
@@ -468,4 +736,12 @@ def get_pipeline_snapshot() -> Dict[str, Any]:
         "new_last_24h": new_items[:80],
         "new_last_24h_count": len(new_items),
         "generated_at": generated_at,
+        "health_score": health,
+        "quality_error_count": error_n,
+        "quality_warn_count": warn_n,
+        "issue_counts": issue_counts,
+        "quality_listings": quality_rows[:80],
+        "duplicate_gps": duplicate_gps[:20],
+        "duplicate_urls": duplicate_urls[:20],
+        "alerts": alerts,
     }

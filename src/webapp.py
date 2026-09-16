@@ -11,7 +11,16 @@ sys.path.insert(0, str(SRC))
 
 from flask import Flask, jsonify, send_from_directory
 
-from config import MIN_SCORE, POINT_A_NAME, POINT_B_NAME, WEB_HOST, WEB_PORT
+from config import (
+    COMMUTE_MAX_MINUTES,
+    MAX_LISTING_AGE_HOURS,
+    MAX_PRICE_CZK,
+    MIN_SCORE,
+    POINT_A_NAME,
+    POINT_B_NAME,
+    WEB_HOST,
+    WEB_PORT,
+)
 from db import get_flats, get_pipeline_snapshot, init_db
 
 WEB_DIR = SRC / "web"
@@ -30,6 +39,9 @@ def api_flats():
         {
             "flats": get_flats(limit=400),
             "min_score": MIN_SCORE,
+            "max_price": MAX_PRICE_CZK,
+            "max_commute": COMMUTE_MAX_MINUTES,
+            "max_age_hours": MAX_LISTING_AGE_HOURS,
             "point_a": POINT_A_NAME,
             "point_b": POINT_B_NAME,
         }

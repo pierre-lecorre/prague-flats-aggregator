@@ -7,37 +7,61 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <style>
     :root {
-      --bg: #0f1412;
-      --panel: #18201c;
-      --line: #2a3832;
-      --text: #e8eee9;
-      --muted: #8fa198;
+      --bg: #0c0f12;
+      --panel: #151b20;
+      --line: #2a343c;
+      --text: #eef3f1;
+      --muted: #8b9aa3;
       --accent: #3dba8b;
       --warn: #e0b25a;
       --bad: #e06b5a;
-      --chip: #24302b;
+      --chip: #1d262c;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font: 14px/1.45 ui-sans-serif, system-ui, sans-serif;
-      background: var(--bg);
+      font: 14px/1.45 "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      background: radial-gradient(1200px 500px at 10% -10%, #163328 0%, transparent 50%), var(--bg);
       color: var(--text);
     }
     header {
       display: flex;
       align-items: center;
       gap: 16px;
-      padding: 14px 20px;
+      padding: 14px 22px;
       border-bottom: 1px solid var(--line);
-      background: var(--panel);
+      background: rgba(12,15,18,.92);
+      backdrop-filter: blur(10px);
       position: sticky;
       top: 0;
-      z-index: 20;
+      z-index: 30;
     }
-    header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+    header h1 { font-size: 17px; margin: 0; font-weight: 650; }
     .tabs { display: flex; gap: 6px; }
-    .tabs button, .filters button {
+    .tabs button {
+      background: var(--chip);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 14px;
+      cursor: pointer;
+    }
+    .tabs button.active { background: var(--accent); color: #062016; border-color: var(--accent); font-weight: 650; }
+    main { padding: 16px 22px 48px; }
+    .hidden { display: none !important; }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 16px;
+      align-items: end;
+      margin-bottom: 14px;
+      padding: 12px 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chips button, .check {
       background: var(--chip);
       color: var(--text);
       border: 1px solid var(--line);
@@ -45,27 +69,70 @@
       padding: 6px 12px;
       cursor: pointer;
     }
-    .tabs button.active, .filters button.active {
-      background: var(--accent);
-      color: #082018;
-      border-color: var(--accent);
+    .chips button.active { background: var(--accent); color: #062016; border-color: var(--accent); }
+    .sliders { display: flex; flex-wrap: wrap; gap: 14px; }
+    label.ctrl { display: grid; gap: 4px; color: var(--muted); font-size: 12px; min-width: 150px; }
+    label.ctrl input[type=range] { width: 160px; }
+    label.ctrl b { color: var(--text); font-size: 13px; }
+    .check { display: inline-flex; align-items: center; gap: 6px; }
+    #map { height: 300px; border-radius: 14px; border: 1px solid var(--line); margin-bottom: 16px; }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 14px;
     }
-    main { padding: 16px 20px 40px; }
-    .hidden { display: none !important; }
-    .filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
-    .layout { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; }
-    @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
-    #map { height: 420px; border-radius: 12px; border: 1px solid var(--line); }
-    .cards { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow: auto; }
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 12px;
+      border-radius: 16px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 100%;
     }
-    .card h3 { margin: 0 0 6px; font-size: 14px; }
-    .meta, .muted { color: var(--muted); }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .photo {
+      height: 210px;
+      background: #0f1614 center/cover no-repeat;
+      position: relative;
+    }
+    .photo::after {
+      content: "";
+      position: absolute;
+      inset: auto 0 0;
+      height: 70%;
+      background: linear-gradient(transparent, rgba(6,10,12,.92));
+    }
+    .photo.empty { display: grid; place-items: center; color: var(--muted); background: #1a2220; }
+    .photo.empty::after { display: none; }
+    .photo .badge {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      background: rgba(0,0,0,.65);
+    }
+    .photo .price-tag {
+      position: absolute;
+      left: 12px;
+      bottom: 10px;
+      z-index: 1;
+      font-size: 20px;
+      font-weight: 750;
+    }
+    .photo .price-tag small { display: block; font-size: 11px; color: #c6d4cc; font-weight: 500; }
+    .card:hover { border-color: #3d4a52; transform: translateY(-2px); transition: .15s ease; }
+    .photo .badge.ok { color: var(--accent); }
+    .photo .badge.warn { color: var(--warn); }
+    .photo .badge.bad { color: #ffb3a8; }
+    .body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+    .body h3 { margin: 0; font-size: 15px; line-height: 1.3; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .price { font-size: 18px; font-weight: 700; }
+    .price span { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; }
     .pill {
       font-size: 12px;
       padding: 2px 8px;
@@ -73,20 +140,23 @@
       background: var(--chip);
       border: 1px solid var(--line);
     }
-    .pill.ok { color: var(--accent); }
-    .pill.warn { color: var(--warn); }
-    .pill.bad { color: var(--bad); }
     a { color: var(--accent); }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
-    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-    .stat b { display: block; font-size: 22px; }
-    table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 12px; overflow: hidden; }
+    .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+    .stat b { display: block; font-size: 26px; }
+    .stat.ok b { color: var(--accent); }
+    .stat.warn b { color: var(--warn); }
+    .stat.bad b { color: var(--bad); }
+    table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 14px; overflow: hidden; }
     th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
     th { color: var(--muted); font-weight: 600; font-size: 12px; }
     .section { margin-top: 22px; }
     .section h2 { font-size: 15px; margin: 0 0 10px; }
     .empty-bar { height: 8px; background: #24302b; border-radius: 99px; overflow: hidden; }
     .empty-bar span { display: block; height: 100%; background: var(--bad); }
+    .sev-error { color: var(--bad); }
+    .sev-warn { color: var(--warn); }
+    .count { color: var(--muted); margin: 0 0 12px; }
   </style>
 </head>
 <body>
@@ -99,35 +169,71 @@
   </header>
   <main>
     <section id="tab-flats">
-      <div class="filters" id="filters"></div>
-      <div class="layout">
-        <div id="map"></div>
-        <div class="cards" id="cards"></div>
+      <div class="toolbar">
+        <div class="chips" id="chips"></div>
+        <div class="sliders">
+          <label class="ctrl">Score ≥ <b id="vScore"></b>
+            <input id="minScore" type="range" min="0" max="100" step="5" />
+          </label>
+          <label class="ctrl">Total ≤ <b id="vPrice"></b>
+            <input id="maxPrice" type="range" min="5000" max="40000" step="500" />
+          </label>
+          <label class="ctrl">Commute ≤ <b id="vTime"></b>
+            <input id="maxTime" type="range" min="10" max="90" step="5" />
+          </label>
+          <label class="ctrl">Listed ≤ <b id="vAge"></b>
+            <input id="maxAge" type="range" min="1" max="72" step="1" />
+          </label>
+          <label class="check"><input id="hideGone" type="checkbox" checked /> Hide reserved / gone</label>
+        </div>
       </div>
+      <div class="count" id="resultCount"></div>
+      <div id="map"></div>
+      <div class="cards" id="cards"></div>
     </section>
     <section id="tab-pipeline" class="hidden">
       <div class="stats" id="stats"></div>
+      <div class="section">
+        <h2>Alerts</h2>
+        <table id="alerts"></table>
+      </div>
       <div class="section">
         <h2>Last scrape per source</h2>
         <table id="runs"></table>
       </div>
       <div class="section">
-        <h2>Empty fields</h2>
+        <h2>Quality issue codes</h2>
+        <table id="codes"></table>
+      </div>
+      <div class="section">
+        <h2>Listings failing checks</h2>
+        <table id="quality"></table>
+      </div>
+      <div class="section">
+        <h2>Empty / missing fields</h2>
         <table id="empty"></table>
+      </div>
+      <div class="section">
+        <h2>Duplicate GPS clusters</h2>
+        <table id="dupgps"></table>
+      </div>
+      <div class="section">
+        <h2>Duplicate URLs</h2>
+        <table id="dupurl"></table>
       </div>
       <div class="section">
         <h2>New last 24h</h2>
         <table id="newish"></table>
       </div>
-      <div class="section">
-        <h2>Incomplete listings</h2>
-        <table id="incomplete"></table>
-      </div>
     </section>
   </main>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
-    const state = { flats: [], minScore: 60, pointA: "A", pointB: "B", filter: "matches", map: null, markers: [] };
+    const state = {
+      flats: [], minScore: 60, maxPrice: 20000, maxTime: 40, maxAge: 24,
+      pointA: "A", pointB: "B", filter: "matches", hideGone: true,
+      map: null, markers: []
+    };
 
     document.querySelectorAll(".tabs button").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -136,7 +242,7 @@
         const tab = btn.dataset.tab;
         document.getElementById("tab-flats").classList.toggle("hidden", tab !== "flats");
         document.getElementById("tab-pipeline").classList.toggle("hidden", tab !== "pipeline");
-        if (tab === "flats" && state.map) state.map.invalidateSize();
+        if (tab === "flats" && state.map) setTimeout(() => state.map.invalidateSize(), 50);
       });
     });
 
@@ -144,62 +250,114 @@
       if (!raw) return "n/a";
       const d = new Date(raw);
       const when = Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
-      return `${when} (${source === "listed" ? "last edited" : "added"})`;
+      return `${when} (${source === "listed" ? "edited" : "added"})`;
     }
     function fmtCzk(v) {
       if (v == null || v === "") return "n/a";
-      return `${Number(v).toLocaleString("cs-CZ")} CZK`;
+      return `${Number(v).toLocaleString("cs-CZ")} Kč`;
     }
     function fmtMin(v) {
       return v == null || v === "" ? "n/a" : `${v} min`;
     }
+    function num(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    function rentOf(flat) {
+      const e = flat.evaluation || {};
+      return num(e.total) ?? num(e.price) ?? num(flat.price);
+    }
+    function commuteOf(flat) {
+      const e = flat.evaluation || {};
+      const vals = [num(e.commute_a), num(e.commute_b)].filter((x) => x != null);
+      return vals.length ? Math.max(...vals) : null;
+    }
+    function ageHours(flat) {
+      const t = new Date(flat.listing_date || flat.created_at).getTime();
+      if (!Number.isFinite(t)) return null;
+      return (Date.now() - t) / 36e5;
+    }
     function statusOf(flat) {
       const e = flat.evaluation || {};
       if (e.is_reserved) return ["reserved", "bad"];
-      if (e.is_unavailable) return ["unavailable", "bad"];
+      if (e.is_unavailable) return ["gone", "bad"];
       if (e.is_flatshare) return ["flatshare", "bad"];
       if (e.is_auction) return ["auction", "warn"];
       if ((e.score || 0) >= state.minScore) return ["match", "ok"];
       if (e.score == null) return ["unevaluated", "warn"];
       return ["low score", "warn"];
     }
-    function passes(flat, filter = state.filter) {
+    function passesChip(flat, filter = state.filter) {
       const e = flat.evaluation || {};
-      const f = filter;
-      if (f === "all") return true;
-      if (f === "matches") return (e.score || 0) >= state.minScore && !e.is_reserved && !e.is_unavailable && !e.is_flatshare;
-      if (f === "reserved") return e.is_reserved || e.is_unavailable;
-      if (f === "incomplete") return (flat.missing_fields || []).length > 0;
-      if (f === "new") {
-        const cut = Date.now() - 24 * 3600 * 1000;
-        const t = new Date(flat.listing_date || flat.created_at).getTime();
-        return t >= cut;
-      }
+      if (filter === "all") return true;
+      if (filter === "matches") return (e.score || 0) >= (state.minScore || 0) && !e.is_reserved && !e.is_unavailable && !e.is_flatshare;
+      if (filter === "reserved") return e.is_reserved || e.is_unavailable;
+      if (filter === "quality") return (flat.quality_errors || 0) > 0;
+      if (filter === "new") return (ageHours(flat) ?? 99) <= 24;
+      return true;
+    }
+    function passes(flat) {
+      if (!passesChip(flat)) return false;
+      const e = flat.evaluation || {};
+      const skipScore = state.filter === "reserved" || state.filter === "quality";
+      if (state.hideGone && state.filter !== "reserved" && (e.is_reserved || e.is_unavailable)) return false;
+      if (!skipScore && (e.score ?? 0) < Number(state.minScore)) return false;
+      const price = rentOf(flat);
+      if (price != null && price > Number(state.maxPrice)) return false;
+      const commute = commuteOf(flat);
+      if (commute != null && commute > Number(state.maxTime)) return false;
+      const age = ageHours(flat);
+      if (age != null && age > Number(state.maxAge)) return false;
       return true;
     }
 
-    function renderFilters() {
+    function bindControls() {
+      const map = [
+        ["minScore", "vScore", (v) => v],
+        ["maxPrice", "vPrice", (v) => fmtCzk(v)],
+        ["maxTime", "vTime", (v) => `${v} min`],
+        ["maxAge", "vAge", (v) => `${v} h`],
+      ];
+      map.forEach(([id, lab, fmt]) => {
+        const el = document.getElementById(id);
+        const out = document.getElementById(lab);
+        const key = id;
+        el.value = state[key];
+        out.textContent = fmt(el.value);
+        el.oninput = () => {
+          state[key] = Number(el.value);
+          out.textContent = fmt(el.value);
+          renderChips();
+          renderFlats();
+        };
+      });
+      const hide = document.getElementById("hideGone");
+      hide.checked = state.hideGone;
+      hide.onchange = () => { state.hideGone = hide.checked; renderChips(); renderFlats(); };
+    }
+
+    function renderChips() {
       const counts = {
-        matches: state.flats.filter((f) => passes(f, "matches")).length,
-        reserved: state.flats.filter((f) => passes(f, "reserved")).length,
-        incomplete: state.flats.filter((f) => passes(f, "incomplete")).length,
-        new: state.flats.filter((f) => passes(f, "new")).length,
+        matches: state.flats.filter((f) => passesChip(f, "matches")).length,
+        reserved: state.flats.filter((f) => passesChip(f, "reserved")).length,
+        quality: state.flats.filter((f) => passesChip(f, "quality")).length,
+        new: state.flats.filter((f) => passesChip(f, "new")).length,
         all: state.flats.length,
       };
       const labels = [
         ["matches", `Matches (${counts.matches})`],
-        ["reserved", `Reserved / gone (${counts.reserved})`],
-        ["incomplete", `Empty fields (${counts.incomplete})`],
         ["new", `New 24h (${counts.new})`],
+        ["quality", `Quality fail (${counts.quality})`],
+        ["reserved", `Reserved (${counts.reserved})`],
         ["all", `All (${counts.all})`],
       ];
-      const root = document.getElementById("filters");
+      const root = document.getElementById("chips");
       root.innerHTML = "";
       labels.forEach(([id, label]) => {
         const b = document.createElement("button");
         b.textContent = label;
         if (state.filter === id) b.classList.add("active");
-        b.onclick = () => { state.filter = id; renderFilters(); renderFlats(); };
+        b.onclick = () => { state.filter = id; renderChips(); renderFlats(); };
         root.appendChild(b);
       });
     }
@@ -212,56 +370,75 @@
         state.markers = [];
       }
       const shown = state.flats.filter(passes);
+      document.getElementById("resultCount").textContent = `${shown.length} flats`;
       shown.forEach((flat) => {
         const e = flat.evaluation || {};
         const [label, klass] = statusOf(flat);
+        const img = (flat.images || [])[0];
         const el = document.createElement("article");
         el.className = "card";
         el.innerHTML = `
-          <h3>${escapeHtml(flat.title || "Untitled")}</h3>
-          <div class="meta">${escapeHtml(flat.address || "no address")} · ${escapeHtml(flat.source || "")}</div>
-          <div class="row">
-            <span class="pill ${klass}">${label}</span>
-            <span class="pill">score ${e.score ?? "n/a"}</span>
-            <span class="pill">rent ${fmtCzk(e.price ?? flat.price)}</span>
-            <span class="pill">fees ${fmtCzk(e.fee)}</span>
-            <span class="pill">total ${fmtCzk(e.total)}</span>
+          <div class="photo ${img ? "" : "empty"}" ${img ? `style="background-image:url('${img.replace(/'/g, "%27")}')"` : ""}>
+            ${img ? "" : "no photo"}
+            <span class="badge ${klass}">${label} · ${e.score ?? "–"}</span>
+            <div class="price-tag">${fmtCzk(rentOf(flat))}<small>total · rent ${fmtCzk(e.price ?? flat.price)} · fees ${fmtCzk(e.fee)}</small></div>
           </div>
-          <div class="row">
-            <span class="pill">${escapeHtml(state.pointA)} ${fmtMin(e.commute_a)}</span>
-            <span class="pill">${escapeHtml(state.pointB)} ${fmtMin(e.commute_b)}</span>
-            <span class="pill">${fmtDate(flat.listing_date, flat.listing_date_source)}</span>
+          <div class="body">
+            <h3>${escapeHtml(flat.title || "Untitled")}</h3>
+            <div class="meta">${escapeHtml(flat.address || "no address")} · ${escapeHtml(flat.source || "")}</div>
+            <div class="row">
+              <span class="pill">${escapeHtml(flat.size_m2 ? `${flat.size_m2} m²` : "size n/a")}</span>
+              <span class="pill">${escapeHtml(state.pointA)} ${fmtMin(e.commute_a)}</span>
+              <span class="pill">${escapeHtml(state.pointB)} ${fmtMin(e.commute_b)}</span>
+            </div>
+            <div class="meta">${fmtDate(flat.listing_date, flat.listing_date_source)}</div>
+            ${flat.quality_errors ? `<div class="sev-error">${flat.quality_errors} quality error(s)</div>` : ""}
+            <div class="meta">${escapeHtml(e.reasons || "")}</div>
+            <div><a href="${flat.url}" target="_blank" rel="noopener">Open listing</a></div>
           </div>
-          ${flat.missing_fields?.length ? `<div class="muted">empty: ${flat.missing_fields.join(", ")}</div>` : ""}
-          <div class="muted">${escapeHtml(e.reasons || "")}</div>
-          <div class="row"><a href="${flat.url}" target="_blank" rel="noopener">Open listing</a></div>
         `;
         cards.appendChild(el);
         if (state.map && flat.latitude != null && flat.longitude != null) {
           const marker = L.marker([flat.latitude, flat.longitude]).addTo(state.map);
-          marker.bindPopup(`<b>${escapeHtml(flat.title || "")}</b><br>${fmtCzk(e.total || flat.price)}`);
+          marker.bindPopup(`<b>${escapeHtml(flat.title || "")}</b><br>${fmtCzk(rentOf(flat))}`);
           state.markers.push(marker);
         }
       });
-      if (!shown.length) cards.innerHTML = `<div class="muted">No flats in this filter.</div>`;
+      if (!shown.length) cards.innerHTML = `<div class="meta">No flats for these filters.</div>`;
     }
 
     function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+      return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    function healthClass(score) {
+      if (score >= 80) return "ok";
+      if (score >= 50) return "warn";
+      return "bad";
     }
 
     function renderPipeline(data) {
       const stats = [
+        ["Health", data.health_score ?? "–", healthClass(data.health_score ?? 0)],
         ["Listings", data.listings_total],
-        ["Active", data.listings_active],
-        ["Evaluated", data.evaluations_total],
-        ["Unevaluated", data.unevaluated],
+        ["Quality errors", data.quality_error_count, data.quality_error_count ? "bad" : "ok"],
+        ["Quality warns", data.quality_warn_count, data.quality_warn_count ? "warn" : "ok"],
+        ["Unevaluated", data.unevaluated, data.unevaluated ? "warn" : ""],
         ["New 24h", data.new_last_24h_count],
-        ["Incomplete", data.incomplete_count],
       ];
-      document.getElementById("stats").innerHTML = stats.map(([k, v]) =>
-        `<div class="stat"><span class="muted">${k}</span><b>${v ?? 0}</b></div>`
+      document.getElementById("stats").innerHTML = stats.map(([k, v, cls]) =>
+        `<div class="stat ${cls || ""}"><span class="meta">${k}</span><b>${v ?? 0}</b></div>`
       ).join("");
+
+      const alerts = data.alerts || [];
+      document.getElementById("alerts").innerHTML = `
+        <tr><th>Sev</th><th>Code</th><th>Detail</th></tr>
+        ${alerts.length ? alerts.map((a) => `<tr>
+          <td class="sev-${a.severity}">${a.severity}</td>
+          <td>${escapeHtml(a.code)}</td>
+          <td>${escapeHtml(a.message)}</td>
+        </tr>`).join("") : "<tr><td colspan=3 class=meta>No pipeline alerts</td></tr>"}
+      `;
 
       const runs = data.last_runs || [];
       document.getElementById("runs").innerHTML = `
@@ -271,8 +448,25 @@
           <td>${escapeHtml(r.finished_at || "")}</td>
           <td>${r.found ?? 0}</td>
           <td>${r.inserted ?? 0}</td>
-          <td class="${r.error ? "pill bad" : ""}">${escapeHtml(r.error || "ok")}</td>
-        </tr>`).join("") : "<tr><td colspan=5 class=muted>No pipeline runs yet. Run python src/main.py</td></tr>"}
+          <td class="${r.error ? "sev-error" : ""}">${escapeHtml(r.error || "ok")}</td>
+        </tr>`).join("") : "<tr><td colspan=5 class=meta>No pipeline runs yet. python src/main.py</td></tr>"}
+      `;
+
+      const codes = Object.entries(data.issue_counts || {}).sort((a, b) => b[1] - a[1]);
+      document.getElementById("codes").innerHTML = `
+        <tr><th>Check</th><th>Hits</th></tr>
+        ${codes.length ? codes.map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join("") : "<tr><td colspan=2 class=meta>No quality hits</td></tr>"}
+      `;
+
+      const ql = data.quality_listings || [];
+      document.getElementById("quality").innerHTML = `
+        <tr><th>Source</th><th>Listing</th><th>Errors</th><th>Warns</th></tr>
+        ${ql.length ? ql.map((r) => `<tr>
+          <td>${escapeHtml(r.source || "")}</td>
+          <td><a href="${r.url}" target="_blank">${escapeHtml(r.title || r.id)}</a></td>
+          <td class="sev-error">${(r.errors || []).map((i) => i.message).join("; ") || "—"}</td>
+          <td class="sev-warn">${(r.warns || []).map((i) => i.message).join("; ") || "—"}</td>
+        </tr>`).join("") : "<tr><td colspan=4 class=meta>No listing-level failures</td></tr>"}
       `;
 
       const empty = Object.entries(data.empty_fields || {});
@@ -286,6 +480,26 @@
         </tr>`).join("")}
       `;
 
+      const dups = data.duplicate_gps || [];
+      document.getElementById("dupgps").innerHTML = `
+        <tr><th>GPS</th><th>Count</th><th>IDs</th></tr>
+        ${dups.length ? dups.map((d) => `<tr>
+          <td>${escapeHtml(d.gps)}</td>
+          <td>${d.count}</td>
+          <td>${escapeHtml((d.ids || []).join(", "))}</td>
+        </tr>`).join("") : "<tr><td colspan=3 class=meta>No GPS clusters (≥3)</td></tr>"}
+      `;
+
+      const dupu = data.duplicate_urls || [];
+      document.getElementById("dupurl").innerHTML = `
+        <tr><th>URL</th><th>Count</th><th>IDs</th></tr>
+        ${dupu.length ? dupu.map((d) => `<tr>
+          <td><a href="${d.url}" target="_blank">${escapeHtml(d.url)}</a></td>
+          <td>${d.count}</td>
+          <td>${escapeHtml((d.ids || []).join(", "))}</td>
+        </tr>`).join("") : "<tr><td colspan=3 class=meta>No duplicate URLs</td></tr>"}
+      `;
+
       const news = data.new_last_24h || [];
       document.getElementById("newish").innerHTML = `
         <tr><th>Date</th><th>Source</th><th>Title</th><th>Empty</th></tr>
@@ -294,17 +508,7 @@
           <td>${escapeHtml(r.source || "")}</td>
           <td><a href="${r.url}" target="_blank">${escapeHtml(r.title || r.id)}</a></td>
           <td>${(r.missing_fields || []).join(", ") || "—"}</td>
-        </tr>`).join("") : "<tr><td colspan=4 class=muted>Nothing new in last 24h</td></tr>"}
-      `;
-
-      const inc = data.incomplete || [];
-      document.getElementById("incomplete").innerHTML = `
-        <tr><th>Source</th><th>Title</th><th>Missing</th></tr>
-        ${inc.length ? inc.map((r) => `<tr>
-          <td>${escapeHtml(r.source || "")}</td>
-          <td><a href="${r.url}" target="_blank">${escapeHtml(r.title || r.id)}</a></td>
-          <td>${(r.missing_fields || []).join(", ")}</td>
-        </tr>`).join("") : "<tr><td colspan=3 class=muted>All required fields filled</td></tr>"}
+        </tr>`).join("") : "<tr><td colspan=4 class=meta>Nothing new in last 24h</td></tr>"}
       `;
     }
 
@@ -314,14 +518,18 @@
         fetch("/api/pipeline").then((r) => r.json()),
       ]);
       state.flats = flatsRes.flats || [];
-      state.minScore = flatsRes.min_score || 60;
+      state.minScore = flatsRes.min_score ?? 60;
+      state.maxPrice = flatsRes.max_price ?? 20000;
+      state.maxTime = flatsRes.max_commute ?? 40;
+      state.maxAge = flatsRes.max_age_hours ?? 24;
       state.pointA = flatsRes.point_a || "A";
       state.pointB = flatsRes.point_b || "B";
+      document.getElementById("minScore").max = 100;
+      document.getElementById("maxPrice").max = Math.max(40000, state.maxPrice);
       state.map = L.map("map").setView([50.08, 14.44], 12);
-      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution: "&copy; OSM",
-      }).addTo(state.map);
-      renderFilters();
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OSM" }).addTo(state.map);
+      bindControls();
+      renderChips();
       renderFlats();
       renderPipeline(pipeRes);
     }

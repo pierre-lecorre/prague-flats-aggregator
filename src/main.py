@@ -19,6 +19,7 @@ from db import (
     get_new_listings,
     save_evaluation,
     listing_date,
+    listing_quality_issues,
     log_pipeline_run,
 )
 from evaluator import Evaluation, evaluate_flat
@@ -115,6 +116,10 @@ async def run_scrapers() -> List[Dict[str, Any]]:
                     insert_listing(listing)
                     all_listings.append(listing)
                     inserted += 1
+                    issues = listing_quality_issues(listing)
+                    bad = [i["code"] for i in issues if i["severity"] == "error"]
+                    if bad:
+                        logger.warning("  quality fail %s: %s", listing.get("url"), ", ".join(bad))
                 else:
                     logger.debug("  Duplicate: %s", listing["url"])
             log_pipeline_run(

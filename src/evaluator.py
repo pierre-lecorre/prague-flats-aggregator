@@ -1,7 +1,36 @@
+"""Per-flat LLM evaluation via llama-cli.
+
+Each flat is sent individually to the model along with the user's criteria.
+The model returns a **fit score from 0 to 100** (100 = perfect match) and a
+short justification.
+"""
+
+import json
+import logging
 import re
-from typing import Dict, Any, Tuple, Optional, List
-from config import MIN_SIZE_M2, COMMUTE_MAX_MINUTES, COMMUTE_TARGET_ADDRESS
-from commute import calculate_commute_time_with_address
+import requests
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+_PROMPT_TEMPLATE = """\
+You are a real-estate assistant. You receive a single flat listing as JSON and \
+the buyer/renter's criteria. Your job is to judge how well the flat matches.
+
+Reply with EXACTLY this format (nothing else):
+SCORE: <integer 0-100>
+REASON: <one or two sentences>
+
+A score of 100 means the flat is a perfect match for every criterion.
+A score of 0 means it fails on all counts.
+
+--- FLAT ---
+{flat_json}
+
+--- CRITERIA ---
+{criteria_json}
+"""
+
 
 # Keywords that suggest flatshare / room rental
 FLATSHARE_KEYWORDS = [
@@ -23,14 +52,50 @@ CITY_AUCTION_KEYWORDS = [
     "hlavní¿¿ město", "praha", "magistrá¿¿t"
 ]
 
+
+def _parse_score(raw: str) -> Tuple[int, str]:
+    """Extract the integer score and reason from the model output."""
+    match = re.search(r"SCORE:\s*(\d+)", raw, re.IGNORECASE)
+    score = int(match.group(1)) if match else 0
+    score = max(0, min(100, score))
+
+    match_reason = re.search(r"REASON:\s*(.+)", raw, re.IGNORECASE | re.DOTALL)
+    reason = match_reason.group(1).strip() if match_reason else raw.strip()
+    return score, reason
+
+
+def _run_llama(model_path: str, prompt: str) -> str:
+    """Invoke local Ollama API and return its output."""
+    url = "http://localhost:11434/api/generate"
+    payload = {
+        "model": model_path,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.3,
+            "num_predict": 256
+        }
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        return resp.json().get("response", "").strip()
+    except Exception as exc:
+        logger.error("Ollama API failed: %s", exc)
+        raise
+
+
 def check_flatshare(description: str, title: str = "") -> bool:
+    """Check if listing appears to be a flatshare/room rental."""
     text = (title + " " + description).lower()
     for keyword in FLATSHARE_KEYWORDS:
         if keyword.lower() in text:
             return True
     return False
 
+
 def check_auction(description: str, title: str = "") -> Tuple[bool, bool]:
+    """Check if listing is an auction, and if it's a city/municipal auction."""
     text = (title + " " + description).lower()
     
     is_auction = any(kw.lower() in text for kw in AUCTION_KEYWORDS)
@@ -40,62 +105,61 @@ def check_auction(description: str, title: str = "") -> Tuple[bool, bool]:
     is_city_auction = any(kw.lower() in text for kw in CITY_AUCTION_KEYWORDS)
     return is_auction, is_city_auction
 
-def evaluate_listing(listing: Dict[str, Any]) -> Tuple[float, str, bool, bool, Optional[float]]:
-    size_m2 = listing.get("size_m2")
-    price = listing.get("price")
-    description = listing.get("description", "")
-    title = listing.get("title", "")
-    latitude = listing.get("latitude")
-    longitude = listing.get("longitude")
-    
-    score = 0
+
+def evaluate_flat(
+    flat: Dict[str, Any],
+    criteria: Dict[str, Any],
+    model_path: Optional[str] = None,
+) -> Tuple[int, str]:
+    """Score a single flat against the criteria.
+
+    Returns ``(score, reason)``.
+    If the LLM is unavailable the function falls back to a simple rule-based
+    heuristic so the pipeline never crashes.
+    """
+    # --- try LLM first ---
+    if model_path:
+        prompt = _PROMPT_TEMPLATE.format(
+            flat_json=json.dumps(flat, ensure_ascii=False, indent=2),
+            criteria_json=json.dumps(criteria, ensure_ascii=False, indent=2),
+        )
+        try:
+            raw = _run_llama(model_path, prompt)
+            score, reason = _parse_score(raw)
+            logger.debug("LLM scored '%s' → %d", flat.get("title", "?"), score)
+            return score, reason
+        except Exception:
+            logger.warning("LLM evaluation failed – falling back to rules.")
+
+    # --- deterministic fallback ---
+    return _rule_based_score(flat, criteria)
+
+
+def _rule_based_score(flat: Dict[str, Any], criteria: Dict[str, Any]) -> Tuple[int, str]:
+    """Simple heuristic scoring when no LLM is available."""
+    score = 100
     reasons = []
-    
-    # Size scoring (25 points)
-    if size_m2 and size_m2 >= MIN_SIZE_M2:
-        score += 25
-        reasons.append(f"Size {size_m2} m2 meets minimum ({MIN_SIZE_M2} m2)")
-    elif size_m2:
-        score += max(0, 25 - (MIN_SIZE_M2 - size_m2) * 2)
-        reasons.append(f"Size {size_m2} m2 slightly below minimum")
-    
-    # Price scoring (25 points)
-    if price and price <= 20000:
-        score += 25
-        reasons.append(f"Price {price} CZK within budget")
-    
-    # Commute scoring (30 points)
-    commute_minutes = None
-    if latitude is not None and longitude is not None:
-        commute_minutes = calculate_commute_time_with_address(latitude, longitude, COMMUTE_TARGET_ADDRESS)
-    
-    if commute_minutes is not None:
-        if commute_minutes <= COMMUTE_MAX_MINUTES:
-            score += 30
-            reasons.append(f"Commute {commute_minutes:.1f} min to Palmovka (max {COMMUTE_MAX_MINUTES})")
-        else:
-            score += max(0, 30 - (commute_minutes - COMMUTE_MAX_MINUTES) * 2)
-            reasons.append(f"Commute {commute_minutes:.1f} min to Palmovka (slightly over)")
-    else:
-        reasons.append("Commute time could not be calculated")
-    
-    # Base score for other factors (20 points)
-    score += 20
-    
-    # Check for flatshare and auctions
-    is_flatshare = check_flatshare(description, title)
-    is_auction, is_city_auction = check_auction(description, title)
-    
-    if is_flatshare:
-        score -= 50
-        reasons.append("WARNING: Appears to be a flatshare/room rental")
-    
-    if is_auction:
-        if is_city_auction:
-            score = -100
-            reasons.append("REJECT: City/municipal auction - ignoring")
-        else:
-            score -= 30
-            reasons.append("WARNING: Appears to be an auction (non-city)")
-    
-    return min(100, max(0, score)), "; ".join(reasons), is_flatshare, is_auction, commute_minutes
+
+    max_price = criteria.get("max_price_czk")
+    if max_price and flat.get("price", 0) > max_price:
+        score -= 40
+        reasons.append(f"price {flat.get('price')} > {max_price}")
+
+    min_bed = criteria.get("min_bedrooms")
+    if min_bed and flat.get("bedrooms", 0) < min_bed:
+        score -= 25
+        reasons.append(f"bedrooms {flat.get('bedrooms', 0)} < {min_bed}")
+
+    min_sqm = criteria.get("min_sqm")
+    if min_sqm and flat.get("sqm", 0) < min_sqm:
+        score -= 25
+        reasons.append(f"sqm {flat.get('sqm', 0)} < {min_sqm}")
+
+    districts = criteria.get("preferred_districts", [])
+    if districts and flat.get("district") not in districts:
+        score -= 10
+        reasons.append(f"district '{flat.get('district')}' not preferred")
+
+    score = max(0, score)
+    reason = "; ".join(reasons) if reasons else "meets all rule-based criteria"
+    return score, reason

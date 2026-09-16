@@ -69,7 +69,8 @@ query AdvertList(
       gps { lat lng }
       isNew
       daysActive
-      mainImage { url }
+      mainImage { url(filter: RECORD_THUMB) }
+      publicImages(limit: 3) { url(filter: RECORD_THUMB) }
     }
   }
 }
@@ -148,7 +149,8 @@ class BezrealitkyScraper(BaseScraper):
 
                 errors = data.get("errors")
                 if errors:
-                    raise ScrapeError(f"bezrealitky GraphQL errors: {errors}")
+                    logger.warning("bezrealitky GraphQL errors: %s", errors)
+                    return None
                 items = ((data.get("data") or {}).get("listAdverts") or {}).get("list") or []
                 if items:
                     return items
@@ -212,7 +214,9 @@ class BezrealitkyScraper(BaseScraper):
             else:
                 item = None
             if isinstance(item, dict):
-                adverts.append(item)
+                resolved = dict(item)
+                resolved["images"] = self._collect_images(resolved, cache)
+                adverts.append(resolved)
         return adverts
 
     def _pick(self, item: Dict[str, Any], name: str):
@@ -223,6 +227,54 @@ class BezrealitkyScraper(BaseScraper):
             if str(key).startswith(prefix):
                 return value
         return None
+
+    def _deref(self, node: Any, cache: Optional[Dict[str, Any]] = None) -> Any:
+        if isinstance(node, dict) and node.get("__ref") and cache:
+            return cache.get(node["__ref"]) or node
+        return node
+
+    def _image_url(self, node: Any, cache: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        obj = self._deref(node, cache)
+        if isinstance(obj, str) and obj.startswith(("http://", "https://", "//")):
+            return obj
+        if not isinstance(obj, dict):
+            return None
+        url = obj.get("url")
+        if isinstance(url, str) and url.startswith(("http://", "https://", "//")):
+            return url
+        thumb = None
+        other = None
+        for key, value in obj.items():
+            if not str(key).startswith("url(") or not isinstance(value, str):
+                continue
+            if "RECORD_THUMB" in key:
+                thumb = value
+            else:
+                other = other or value
+        return thumb or other
+
+    def _collect_images(
+        self, item: Dict[str, Any], cache: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
+        urls: List[str] = []
+        seen = set()
+
+        def add(node: Any) -> None:
+            url = self._image_url(node, cache)
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        add(item.get("mainImage"))
+        pubs = item.get("publicImages")
+        if pubs is None:
+            pubs = self._pick(item, "publicImages")
+        if isinstance(pubs, list):
+            for photo in pubs:
+                add(photo)
+        for extra in item.get("images") or []:
+            add(extra)
+        return urls
 
     def _parse_item(self, item: Dict[str, Any]):
         if item.get("roommate"):
@@ -237,10 +289,7 @@ class BezrealitkyScraper(BaseScraper):
         charges = item.get("charges")
         if charges:
             desc_bits.append(f"poplatky {charges} CZK")
-        images = []
-        main = item.get("mainImage")
-        if isinstance(main, dict) and main.get("url"):
-            images.append(main["url"])
+        images = self._collect_images(item)
         return self.make_listing(
             url=f"{self.base_url}/nemovitosti-byty-domy/{uri}",
             title=title,

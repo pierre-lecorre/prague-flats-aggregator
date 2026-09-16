@@ -10,6 +10,7 @@ https://github.com/pierre-lecorre/landomo-scraper
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Optional, Tuple, List
 
 import httpx
@@ -25,6 +26,15 @@ MAPY_GEOCODE_URL = "https://api.mapy.cz/v1/geocode"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
 _GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
+_PRAGUE_CENTROIDS = (
+    (50.0755, 14.4378),  # Praha city
+    (50.0870, 14.4203),  # Staré Město
+    (50.0833, 14.4167),
+)
+_GENERIC_PLACE = re.compile(
+    r"^(praha|prague)(\s+\d+)?(\s*[-–]\s*[\wáčďéěíňóřšťúůýž\s]+)?$",
+    re.IGNORECASE,
+)
 
 
 def _client() -> httpx.Client:
@@ -96,6 +106,38 @@ def _to_minutes(seconds: Optional[float]) -> Optional[float]:
     return round(seconds / 60, 1)
 
 
+def _is_praha_place(part: str) -> bool:
+    blob = re.sub(r"\s+", " ", (part or "").strip())
+    return bool(_GENERIC_PLACE.match(blob))
+
+
+def _address_has_street(address: str) -> bool:
+    raw = (address or "").strip()
+    if not raw:
+        return False
+    if re.search(r"\d+/\d+", raw):
+        return True
+    if re.search(r"\b(ulice|náměstí|nám\.?|třída|nábřeží)\b", raw, re.IGNORECASE):
+        return True
+    parts = [p.strip() for p in re.split(r"[,;]", raw) if p.strip()] or [raw]
+    streets = []
+    for part in parts:
+        if _is_praha_place(part):
+            continue
+        if re.search(r"pronájem|pronajem|\bbyt\b", part, re.IGNORECASE):
+            continue
+        if re.search(r"[A-Za-zÁ-Žá-ž]{3,}", part):
+            streets.append(part)
+    return bool(streets)
+
+
+def _is_prague_centroid(lat: float, lon: float) -> bool:
+    for clat, clon in _PRAGUE_CENTROIDS:
+        if (lat - clat) ** 2 + (lon - clon) ** 2 < 0.00003:
+            return True
+    return False
+
+
 def _geocode_queries(address: str) -> List[str]:
     raw = (address or "").strip()
     if not raw:
@@ -127,6 +169,9 @@ def _geocode_queries(address: str) -> List[str]:
 
 
 def _geocode_address(address: str, mapy_key: Optional[str]) -> Optional[Tuple[float, float]]:
+    if not _address_has_street(address):
+        logger.info("Skip coarse geocode for %r", address)
+        return None
     for query in _geocode_queries(address):
         cached = _GEOCODE_CACHE.get(query.lower())
         if query.lower() in _GEOCODE_CACHE:
@@ -138,6 +183,9 @@ def _geocode_address(address: str, mapy_key: Optional[str]) -> Optional[Tuple[fl
             coords = _geocode_mapy(query, mapy_key)
         if coords is None:
             coords = _geocode_nominatim(query)
+        if coords and _is_prague_centroid(coords[0], coords[1]):
+            logger.info("Reject Praha centroid for %r", query)
+            coords = None
         _GEOCODE_CACHE[query.lower()] = coords
         if coords:
             return coords
@@ -209,7 +257,7 @@ def compute_commute_to_flat(
     flat_lat = flat.get("latitude") or flat.get("lat")
     flat_lon = flat.get("longitude") or flat.get("lon") or flat.get("lng")
     if flat_lat is None or flat_lon is None:
-        geocoded = _geocode_address(str(flat.get("address") or flat.get("title") or ""), key)
+        geocoded = _geocode_address(str(flat.get("address") or ""), key)
         if geocoded:
             flat_lat, flat_lon = geocoded
             flat["latitude"], flat["longitude"] = geocoded

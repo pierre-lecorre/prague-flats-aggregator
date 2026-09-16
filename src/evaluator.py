@@ -1,6 +1,7 @@
 import re
 from typing import Dict, Any, Tuple, Optional, List
-from config import MIN_SIZE_M2, COMMUTE_MAX_MINUTES
+from config import MIN_SIZE_M2, COMMUTE_MAX_MINUTES, COMMUTE_TARGET_ADDRESS
+from commute import calculate_commute_time_with_address
 
 # Keywords that suggest flatshare / room rental
 FLATSHARE_KEYWORDS = [
@@ -39,31 +40,6 @@ def check_auction(description: str, title: str = "") -> Tuple[bool, bool]:
     is_city_auction = any(kw.lower() in text for kw in CITY_AUCTION_KEYWORDS)
     return is_auction, is_city_auction
 
-def calculate_commute_time(latitude: Optional[float], longitude: Optional[float], 
-                          target_address: str = "Palmovka, Prague") -> Optional[float]:
-    if latitude is None or longitude is None:
-        return None
-    
-    try:
-        import httpx
-        url = "https://router.project-osrm.org/route/v1/driving"
-        
-        origin = f"{longitude},{latitude}"
-        
-        full_url = f"{url}/{origin};14.4639,50.1067?overview=false"
-        
-        with httpx.Client(timeout=10) as client:
-            response = client.get(full_url)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("routes") and len(data["routes"]) > 0:
-                    duration_seconds = data["routes"][0]["duration"]
-                    return duration_seconds / 60.0
-    except Exception as e:
-        print(f"Commute calculation failed: {e}")
-    
-    return None
-
 def evaluate_listing(listing: Dict[str, Any]) -> Tuple[float, str, bool, bool, Optional[float]]:
     size_m2 = listing.get("size_m2")
     price = listing.get("price")
@@ -75,6 +51,7 @@ def evaluate_listing(listing: Dict[str, Any]) -> Tuple[float, str, bool, bool, O
     score = 0
     reasons = []
     
+    # Size scoring (25 points)
     if size_m2 and size_m2 >= MIN_SIZE_M2:
         score += 25
         reasons.append(f"Size {size_m2} m2 meets minimum ({MIN_SIZE_M2} m2)")
@@ -82,11 +59,16 @@ def evaluate_listing(listing: Dict[str, Any]) -> Tuple[float, str, bool, bool, O
         score += max(0, 25 - (MIN_SIZE_M2 - size_m2) * 2)
         reasons.append(f"Size {size_m2} m2 slightly below minimum")
     
+    # Price scoring (25 points)
     if price and price <= 20000:
         score += 25
         reasons.append(f"Price {price} CZK within budget")
     
-    commute_minutes = calculate_commute_time(latitude, longitude)
+    # Commute scoring (30 points)
+    commute_minutes = None
+    if latitude is not None and longitude is not None:
+        commute_minutes = calculate_commute_time_with_address(latitude, longitude, COMMUTE_TARGET_ADDRESS)
+    
     if commute_minutes is not None:
         if commute_minutes <= COMMUTE_MAX_MINUTES:
             score += 30
@@ -97,8 +79,10 @@ def evaluate_listing(listing: Dict[str, Any]) -> Tuple[float, str, bool, bool, O
     else:
         reasons.append("Commute time could not be calculated")
     
+    # Base score for other factors (20 points)
     score += 20
     
+    # Check for flatshare and auctions
     is_flatshare = check_flatshare(description, title)
     is_auction, is_city_auction = check_auction(description, title)
     

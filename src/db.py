@@ -106,38 +106,94 @@ def listing_exists(listing_id: str) -> bool:
 
 
 def insert_listing(listing: Dict[str, Any]):
+    upsert_listing(listing)
+
+
+def upsert_listing(listing: Dict[str, Any]) -> bool:
+    """Insert or refresh a listing. Returns True if the row was new."""
     conn = _connect()
     cursor = conn.cursor()
     now = datetime.utcnow().isoformat()
-    cursor.execute("""
-        INSERT OR REPLACE INTO listings
-        (id, source, title, price, size_m2, address, url, description, images,
-         latitude, longitude, created_at, updated_at, is_active,
-         listed_at, bedrooms, district, json_data, listed_fees)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        listing["id"],
-        listing["source"],
+    cursor.execute(
+        """
+        SELECT created_at, description, address, images, latitude, longitude, listed_at
+        FROM listings WHERE id = ?
+        """,
+        (listing["id"],),
+    )
+    existing = cursor.fetchone()
+    is_new = existing is None
+    created = existing[0] if existing else now
+    description = listing.get("description") or ""
+    address = listing.get("address") or ""
+    images = listing.get("images") or []
+    lat = listing.get("latitude")
+    lon = listing.get("longitude")
+    listed_at = listing.get("listed_at")
+    if existing:
+        old_desc, old_addr, old_images = existing[1] or "", existing[2] or "", existing[3]
+        if old_desc and len(old_desc) > len(description or ""):
+            description = old_desc
+        if old_addr and not address:
+            address = old_addr
+        if not images:
+            try:
+                images = json.loads(old_images) if old_images else []
+            except (TypeError, json.JSONDecodeError):
+                images = []
+        if lat is None:
+            lat = existing[4]
+        if lon is None:
+            lon = existing[5]
+        if not listed_at:
+            listed_at = existing[6]
+    payload = (
+        listing.get("source"),
         listing.get("title"),
         listing.get("price"),
         listing.get("size_m2"),
-        listing.get("address"),
+        address,
         listing["url"],
-        listing.get("description", ""),
-        json.dumps(listing.get("images", [])),
-        listing.get("latitude"),
-        listing.get("longitude"),
+        description,
+        json.dumps(images),
+        lat,
+        lon,
         now,
-        now,
-        1,
-        listing.get("listed_at"),
+        listed_at,
         listing.get("bedrooms"),
         listing.get("district"),
         json.dumps(listing, ensure_ascii=False, default=str),
         listing.get("listed_fees"),
-    ))
+        listing["id"],
+    )
+    if existing:
+        cursor.execute(
+            """
+            UPDATE listings SET
+                source=?, title=?, price=?, size_m2=?, address=?, url=?, description=?,
+                images=?, latitude=?, longitude=?, updated_at=?, listed_at=?,
+                bedrooms=?, district=?, json_data=?, listed_fees=?, is_active=1
+            WHERE id=?
+            """,
+            payload,
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO listings
+            (source, title, price, size_m2, address, url, description, images,
+             latitude, longitude, updated_at, listed_at, bedrooms, district,
+             json_data, listed_fees, id, created_at, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            payload[:-1] + (listing["id"], created),
+        )
     conn.commit()
     conn.close()
+    listing["description"] = description
+    listing["address"] = address
+    listing["images"] = images
+    return is_new
 
 
 def get_new_listings() -> List[Dict[str, Any]]:
@@ -215,6 +271,67 @@ def save_evaluation(
     ))
     conn.commit()
     conn.close()
+
+
+def update_listing_coords(listing_id: str, lat: float, lon: float) -> None:
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE listings
+        SET latitude = ?, longitude = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (lat, lon, datetime.utcnow().isoformat(), listing_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_evaluation_commute(
+    listing_id: str,
+    commute_a: Optional[float],
+    commute_b: Optional[float],
+) -> None:
+    conn = _connect()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE evaluations
+        SET commute_a = ?, commute_b = ?, commute_minutes = ?
+        WHERE id = (
+            SELECT id FROM evaluations
+            WHERE listing_id = ?
+            ORDER BY evaluated_at DESC, id DESC
+            LIMIT 1
+        )
+        """,
+        (commute_a, commute_b, commute_a, listing_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_listings_needing_commute(min_score: Optional[float] = None) -> List[Dict[str, Any]]:
+    threshold = MIN_SCORE if min_score is None else min_score
+    conn = _connect()
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        _FLATS_SQL
+        + """
+        WHERE l.is_active = 1
+          AND e.score >= ?
+          AND IFNULL(e.is_reserved, 0) = 0
+          AND IFNULL(e.is_unavailable, 0) = 0
+          AND IFNULL(e.is_flatshare, 0) = 0
+          AND (e.commute_a IS NULL OR e.commute_b IS NULL)
+        """,
+        (threshold,),
+    )
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return [_decorate_listing(row) for row in rows]
 
 
 def mark_listing_inactive(listing_id: str):

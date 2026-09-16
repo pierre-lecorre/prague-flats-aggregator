@@ -42,6 +42,7 @@ query SearchOffer(
       location { address latitude longitude }
       createdAt
       updatedAt
+      photos { main list }
     }
   }
 }
@@ -116,6 +117,17 @@ class RealingoScraper(BaseScraper):
             title_parts.append(f"{area} m²")
         if loc.get("address"):
             title_parts.append(loc["address"])
+        photos = item.get("photos") or {}
+        image_ids = []
+        if photos.get("main"):
+            image_ids.append(photos["main"])
+        for photo in photos.get("list") or []:
+            if photo and photo not in image_ids:
+                image_ids.append(photo)
+        images = [
+            f"https://www.realingo.cz/static/images/{photo_id}.jpg"
+            for photo_id in image_ids[:5]
+        ]
         return self.make_listing(
             url=urljoin(self.base_url, item.get("url") or ""),
             title=", ".join(title_parts),
@@ -123,6 +135,7 @@ class RealingoScraper(BaseScraper):
             size_m2=float(area) if area else None,
             address=loc.get("address") or "",
             description=", ".join(title_parts),
+            images=images,
             latitude=loc.get("latitude"),
             longitude=loc.get("longitude"),
             listed_at=item.get("updatedAt") or item.get("createdAt"),

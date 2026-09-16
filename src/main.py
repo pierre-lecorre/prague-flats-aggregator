@@ -14,13 +14,15 @@ from config import (
 )
 from db import (
     init_db,
-    listing_exists,
-    insert_listing,
+    upsert_listing,
     get_new_listings,
     save_evaluation,
     listing_date,
     listing_quality_issues,
     log_pipeline_run,
+    get_listings_needing_commute,
+    update_evaluation_commute,
+    update_listing_coords,
 )
 from evaluator import Evaluation, evaluate_flat
 from notifier import send_telegram_message, send_telegram_alert
@@ -112,16 +114,14 @@ async def run_scrapers() -> List[Dict[str, Any]]:
             for listing in listings:
                 if listing.get("listed_at") and not is_fresh_timestamp(listing["listed_at"]):
                     continue
-                if not listing_exists(listing["id"]):
-                    insert_listing(listing)
+                is_new = upsert_listing(listing)
+                if is_new:
                     all_listings.append(listing)
                     inserted += 1
-                    issues = listing_quality_issues(listing)
-                    bad = [i["code"] for i in issues if i["severity"] == "error"]
-                    if bad:
-                        logger.warning("  quality fail %s: %s", listing.get("url"), ", ".join(bad))
-                else:
-                    logger.debug("  Duplicate: %s", listing["url"])
+                issues = listing_quality_issues(listing)
+                bad = [i["code"] for i in issues if i["severity"] == "error"]
+                if bad:
+                    logger.warning("  quality fail %s: %s", listing.get("url"), ", ".join(bad))
             log_pipeline_run(
                 source_name,
                 found=found,
@@ -245,6 +245,8 @@ async def process_new_listings():
             continue
 
         commute_a, commute_b = compute_commute_to_flat(listing)
+        if listing.get("latitude") is not None and listing.get("longitude") is not None:
+            update_listing_coords(listing["id"], listing["latitude"], listing["longitude"])
         save_evaluation(
             listing_id=listing["id"],
             score=evaluation.score,
@@ -277,6 +279,27 @@ async def process_new_listings():
     logger.info("Done — %d new matches.", matches)
 
 
+async def backfill_commutes() -> None:
+    rows = get_listings_needing_commute()
+    if not rows:
+        return
+    logger.info("Backfilling commute for %d matches", len(rows))
+    for listing in rows:
+        commute_a, commute_b = compute_commute_to_flat(listing)
+        if commute_a is None and commute_b is None:
+            logger.warning("  still no commute: %s", listing.get("url"))
+            continue
+        update_evaluation_commute(listing["id"], commute_a, commute_b)
+        if listing.get("latitude") is not None and listing.get("longitude") is not None:
+            update_listing_coords(listing["id"], listing["latitude"], listing["longitude"])
+        logger.info(
+            "  commute filled %s: A=%s B=%s",
+            listing.get("title"),
+            commute_a,
+            commute_b,
+        )
+
+
 async def main():
     if DRY_RUN:
         logger.info("DRY_RUN is on")
@@ -288,6 +311,7 @@ async def main():
 
     logger.info("Processing new listings...")
     await process_new_listings()
+    await backfill_commutes()
 
 
 if __name__ == "__main__":

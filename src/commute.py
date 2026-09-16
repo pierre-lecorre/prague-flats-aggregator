@@ -25,6 +25,7 @@ MOTIS_UA = "PragueFlatsAggregator/1.0 (flat-search-tool)"
 MAPY_ROUTE_URL = "https://api.mapy.cz/v1/routing/route"
 MAPY_GEOCODE_URL = "https://api.mapy.cz/v1/geocode"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OSRM_FOOT_URL = "https://router.project-osrm.org/route/v1/foot/{lon1},{lat1};{lon2},{lat2}"
 
 _GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
 _NOMINATIM_MIN_INTERVAL = 1.2
@@ -100,6 +101,23 @@ def _walking_duration(
         return duration
     except Exception as exc:
         logger.warning("Mapy.cz %s request failed: %s", MAPY_ROUTE_TYPE, exc)
+        return None
+
+
+def _osrm_duration(origin: Dict[str, float], dest: Dict[str, float]) -> Optional[float]:
+    url = OSRM_FOOT_URL.format(
+        lon1=origin["lon"], lat1=origin["lat"], lon2=dest["lon"], lat2=dest["lat"]
+    )
+    try:
+        with _client() as client:
+            resp = client.get(url, params={"overview": "false"})
+            resp.raise_for_status()
+            routes = resp.json().get("routes") or []
+        if not routes:
+            return None
+        return float(routes[0]["duration"])
+    except Exception as exc:
+        logger.warning("OSRM foot request failed: %s", exc)
         return None
 
 
@@ -260,6 +278,15 @@ def _geocode_nominatim(query: str) -> Optional[Tuple[float, float]]:
     return None
 
 
+def _as_coord(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def compute_commute_to_flat(
     flat: Dict[str, Any],
     point_a: Optional[Dict[str, float]] = None,
@@ -273,14 +300,19 @@ def compute_commute_to_flat(
     key = MAPY_API_KEY if mapy_key is None else mapy_key
     point_a = point_a or POINT_A
     point_b = point_b or POINT_B
-    flat_lat = flat.get("latitude") or flat.get("lat")
-    flat_lon = flat.get("longitude") or flat.get("lon") or flat.get("lng")
+    flat_lat = _as_coord(flat.get("latitude") if flat.get("latitude") is not None else flat.get("lat"))
+    flat_lon = _as_coord(
+        flat.get("longitude") if flat.get("longitude") is not None else (flat.get("lon") or flat.get("lng"))
+    )
     if flat_lat is None or flat_lon is None:
-        geocoded = _geocode_address(str(flat.get("address") or ""), key)
+        address = str(flat.get("address") or "")
+        if not _address_has_street(address):
+            address = str(flat.get("title") or "")
+        geocoded = _geocode_address(address, key)
         if geocoded:
             flat_lat, flat_lon = geocoded
             flat["latitude"], flat["longitude"] = geocoded
-            logger.info("Geocoded '%s' → %s,%s", flat.get("address") or flat.get("title"), flat_lat, flat_lon)
+            logger.info("Geocoded '%s' → %s,%s", address, flat_lat, flat_lon)
         else:
             logger.warning("Flat '%s' has no coordinates — skip commute.", flat.get("title"))
             return None, None
@@ -291,7 +323,10 @@ def compute_commute_to_flat(
         transit = _transit_duration(origin, dest)
         if transit is not None:
             return transit
-        return _walking_duration(origin, dest, key)
+        walking = _walking_duration(origin, dest, key)
+        if walking is not None:
+            return walking
+        return _osrm_duration(origin, dest)
 
     mins_a = _to_minutes(best(point_a))
     mins_b = _to_minutes(best(point_b))

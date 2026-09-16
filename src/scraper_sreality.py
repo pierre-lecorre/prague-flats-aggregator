@@ -1,7 +1,8 @@
+import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
 from config import MAX_LISTING_AGE_HOURS, SOURCES
@@ -79,23 +80,98 @@ class SrealityScraper(BaseScraper):
                 listings.append(listing)
 
         listings = self.dedupe(listings)
+        async with http_client() as client:
+            await self._fill_details(client, listings)
         logger.info("sreality: %d fresh listings", len(listings))
         return listings
 
-    def _parse_item(self, item: Dict[str, Any]):
-        loc = item.get("locality") or {}
-        title = item.get("name") or ""
-        address_parts = [
-            loc.get("street"),
-            loc.get("cityPart") or loc.get("city"),
-            loc.get("district"),
+    async def _fill_details(self, client, listings: List[Dict[str, Any]]) -> None:
+        sem = asyncio.Semaphore(2)
+
+        async def one(listing: Dict[str, Any]) -> None:
+            async with sem:
+                try:
+                    response = await client.get(listing["url"])
+                    response.raise_for_status()
+                except Exception as exc:
+                    logger.warning("sreality detail failed %s: %s", listing.get("url"), exc)
+                    return
+                estate = self._estate_from_html(response.text)
+                if not estate:
+                    return
+                desc = (estate.get("description") or "").strip()
+                if desc:
+                    listing["description"] = desc
+                loc = estate.get("locality") if isinstance(estate.get("locality"), dict) else {}
+                address = self._address_from_loc(loc) or listing.get("address")
+                if address:
+                    listing["address"] = address
+                if loc.get("latitude") is not None:
+                    listing["latitude"] = loc.get("latitude")
+                    listing["longitude"] = loc.get("longitude")
+                images = self._images_from(estate.get("images") or listing.get("images") or [])
+                if images:
+                    listing["images"] = images
+                await asyncio.sleep(0.35)
+
+        if listings:
+            await asyncio.gather(*[one(item) for item in listings])
+
+    def _estate_from_html(self, html: str) -> Optional[Dict[str, Any]]:
+        match = re.search(
+            r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+            html,
+            re.DOTALL,
+        )
+        if not match:
+            return None
+        try:
+            payload = json.loads(match.group(1))
+            queries = payload["props"]["pageProps"]["dehydratedState"]["queries"]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        for query in queries:
+            key = query.get("queryKey") or []
+            if isinstance(key, list) and key and key[0] == "estate":
+                data = (query.get("state") or {}).get("data")
+                if isinstance(data, dict):
+                    return data
+        return None
+
+    def _address_from_loc(self, loc: Any) -> str:
+        if isinstance(loc, str):
+            return loc.strip()
+        if not isinstance(loc, dict):
+            return ""
+        street = loc.get("street") or ""
+        num = loc.get("streetNumber") or loc.get("houseNumber")
+        if street and num:
+            street = f"{street} {num}"
+        parts = [
+            street,
+            loc.get("cityPart") or loc.get("quarter"),
+            loc.get("district") or loc.get("city"),
         ]
-        address = ", ".join(p for p in address_parts if p)
-        images = []
-        if item.get("images"):
-            img = item["images"][0].get("url") or ""
-            if img:
-                images.append("https:" + img if img.startswith("//") else img)
+        return ", ".join(p for p in parts if p)
+
+    def _images_from(self, raw: Any) -> List[str]:
+        urls: List[str] = []
+        items = raw if isinstance(raw, list) else []
+        for item in items:
+            img = item.get("url") if isinstance(item, dict) else item
+            if not img:
+                continue
+            url = "https:" + img if str(img).startswith("//") else str(img)
+            if url not in urls:
+                urls.append(url)
+            if len(urls) >= 3:
+                break
+        return urls
+
+    def _parse_item(self, item: Dict[str, Any]):
+        loc = item.get("locality") if isinstance(item.get("locality"), dict) else {}
+        title = (item.get("name") or "").replace("\xa0", " ")
+        address = self._address_from_loc(loc)
         return self.make_listing(
             url=self._offer_url(item),
             title=title,
@@ -103,7 +179,7 @@ class SrealityScraper(BaseScraper):
             size_m2=self.parse_size(title),
             address=address,
             description=title,
-            images=images,
+            images=self._images_from(item.get("images") or []),
             latitude=loc.get("latitude"),
             longitude=loc.get("longitude"),
         )

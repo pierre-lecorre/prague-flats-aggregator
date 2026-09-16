@@ -1,30 +1,48 @@
-"""Per-flat LLM evaluation via llama-cli.
+"""Per-flat LLM evaluation via Ollama.
 
-Each flat is sent individually to the model along with the user's criteria.
-The model returns a **fit score from 0 to 100** (100 = perfect match) and a
-short justification.
+One model call classifies the listing (flatshare / auction / city auction)
+and scores fit against the user's criteria. No keyword or rule fallback.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import re
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
 import requests
-from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = """\
-You are a real-estate assistant. You receive a single flat listing as JSON and \
-the buyer/renter's criteria. Your job is to judge how well the flat matches.
+You are a Prague rental-flat screening assistant.
+Read the listing (Czech or English) and the renter's criteria.
+Judge from meaning, not from a keyword list.
 
-Reply with EXACTLY this format (nothing else):
-SCORE: <integer 0-100>
-REASON: <one or two sentences>
+Classify:
+- is_flatshare: true if this is a room, shared flat, roommate search, or
+  spolubydlení / pokoj — not a whole apartment for one household.
+- is_auction: true if the listing is an auction / dražba / aukce.
+- is_city_auction: true only if the seller is a city, municipal district,
+  magistrát, or similar public body. Private/developer auctions are false.
 
-A score of 100 means the flat is a perfect match for every criterion.
-A score of 0 means it fails on all counts.
+Score 0–100 how well the listing matches the criteria
+(100 = perfect, 0 = fails almost everything).
+Use the free-text notes in criteria as hard preferences.
+Force score to 0 when is_flatshare or is_city_auction is true.
 
---- FLAT ---
+Reply with JSON only, no markdown, this schema:
+{{
+  "score": <integer 0-100>,
+  "reason": "<one or two sentences>",
+  "is_flatshare": <true|false>,
+  "is_auction": <true|false>,
+  "is_city_auction": <true|false>
+}}
+
+--- LISTING ---
 {flat_json}
 
 --- CRITERIA ---
@@ -32,36 +50,74 @@ A score of 0 means it fails on all counts.
 """
 
 
-# Keywords that suggest flatshare / room rental
-FLATSHARE_KEYWORDS = [
-    "spoluná¿¿em", "spoluná¿¿emka", "spolubydlí¿¿í¿¿", "spolubydlí¿¿í¿¿í¿¿",
-    "pokoj", "room", "flatshare", "shared flat", "roommate",
-    "hledá¿¿m spolubydlí¿¿í¿¿í¿¿ho", "hledá¿¿me spolubydlí¿¿í¿¿í¿¿ho",
-    "sdí¿¿lení¿¿", "sdí¿¿lená¿¿", "shared accommodation"
-]
-
-# Keywords that suggest auctions
-AUCTION_KEYWORDS = [
-    "aukce", "auction", "dražba", "dražební¿¿",
-    "veřejná¿¿ dražba", "public auction", "exekuční¿¿ dražba"
-]
-
-# Keywords that suggest city/municipal auctions (to ignore)
-CITY_AUCTION_KEYWORDS = [
-    "město", "městská¿¿", "městská¿¿ část", "municipal", "city auction",
-    "hlavní¿¿ město", "praha", "magistrá¿¿t"
-]
+@dataclass(frozen=True)
+class Evaluation:
+    score: int
+    reason: str
+    is_flatshare: bool = False
+    is_auction: bool = False
+    is_city_auction: bool = False
 
 
-def _parse_score(raw: str) -> Tuple[int, str]:
-    """Extract the integer score and reason from the model output."""
-    match = re.search(r"SCORE:\s*(\d+)", raw, re.IGNORECASE)
-    score = int(match.group(1)) if match else 0
+def _listing_payload(flat: Dict[str, Any]) -> Dict[str, Any]:
+    keys = (
+        "id", "source", "title", "price", "size_m2", "address", "url",
+        "description", "bedrooms", "district", "listed_at",
+    )
+    payload = {k: flat.get(k) for k in keys}
+    desc = payload.get("description") or ""
+    if len(desc) > 4000:
+        payload["description"] = desc[:4000] + "…"
+    return payload
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes"}
+    return bool(value)
+
+
+def _extract_json(raw: str) -> Dict[str, Any]:
+    raw = raw.strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object in model output: {raw[:200]!r}")
+    data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("Model JSON is not an object")
+    return data
+
+
+def _parse_evaluation(raw: str) -> Evaluation:
+    data = _extract_json(raw)
+    try:
+        score = int(data.get("score", 0))
+    except (TypeError, ValueError):
+        score = 0
     score = max(0, min(100, score))
-
-    match_reason = re.search(r"REASON:\s*(.+)", raw, re.IGNORECASE | re.DOTALL)
-    reason = match_reason.group(1).strip() if match_reason else raw.strip()
-    return score, reason
+    reason = str(data.get("reason") or "").strip() or raw.strip()
+    is_flatshare = _as_bool(data.get("is_flatshare", False))
+    is_auction = _as_bool(data.get("is_auction", False))
+    is_city_auction = _as_bool(data.get("is_city_auction", False))
+    if is_city_auction:
+        is_auction = True
+    if is_flatshare or is_city_auction:
+        score = 0
+    return Evaluation(
+        score=score,
+        reason=reason,
+        is_flatshare=is_flatshare,
+        is_auction=is_auction,
+        is_city_auction=is_city_auction,
+    )
 
 
 def _run_llama(model_path: str, prompt: str) -> str:
@@ -71,10 +127,11 @@ def _run_llama(model_path: str, prompt: str) -> str:
         "model": model_path,
         "prompt": prompt,
         "stream": False,
+        "format": "json",
         "options": {
-            "temperature": 0.3,
-            "num_predict": 256
-        }
+            "temperature": 0.1,
+            "num_predict": 256,
+        },
     }
     try:
         resp = requests.post(url, json=payload, timeout=120)
@@ -85,81 +142,36 @@ def _run_llama(model_path: str, prompt: str) -> str:
         raise
 
 
-def check_flatshare(description: str, title: str = "") -> bool:
-    """Check if listing appears to be a flatshare/room rental."""
-    text = (title + " " + description).lower()
-    for keyword in FLATSHARE_KEYWORDS:
-        if keyword.lower() in text:
-            return True
-    return False
-
-
-def check_auction(description: str, title: str = "") -> Tuple[bool, bool]:
-    """Check if listing is an auction, and if it's a city/municipal auction."""
-    text = (title + " " + description).lower()
-    
-    is_auction = any(kw.lower() in text for kw in AUCTION_KEYWORDS)
-    if not is_auction:
-        return False, False
-    
-    is_city_auction = any(kw.lower() in text for kw in CITY_AUCTION_KEYWORDS)
-    return is_auction, is_city_auction
-
-
 def evaluate_flat(
     flat: Dict[str, Any],
     criteria: Dict[str, Any],
     model_path: Optional[str] = None,
-) -> Tuple[int, str]:
-    """Score a single flat against the criteria.
+) -> Evaluation:
+    """Score and classify a listing with the LLM.
 
-    Returns ``(score, reason)``.
-    If the LLM is unavailable the function falls back to a simple rule-based
-    heuristic so the pipeline never crashes.
+    Returns ``Evaluation``. On LLM failure, score 0 and all flags false
+    so the pipeline keeps running.
     """
-    # --- try LLM first ---
-    if model_path:
-        prompt = _PROMPT_TEMPLATE.format(
-            flat_json=json.dumps(flat, ensure_ascii=False, indent=2),
-            criteria_json=json.dumps(criteria, ensure_ascii=False, indent=2),
+    if not model_path:
+        logger.error("No Ollama model configured — cannot evaluate.")
+        return Evaluation(score=0, reason="LLM unavailable: no model configured")
+
+    prompt = _PROMPT_TEMPLATE.format(
+        flat_json=json.dumps(_listing_payload(flat), ensure_ascii=False, indent=2),
+        criteria_json=json.dumps(criteria, ensure_ascii=False, indent=2),
+    )
+    try:
+        raw = _run_llama(model_path, prompt)
+        evaluation = _parse_evaluation(raw)
+        logger.debug(
+            "LLM scored '%s' → %d (flatshare=%s auction=%s city=%s)",
+            flat.get("title", "?"),
+            evaluation.score,
+            evaluation.is_flatshare,
+            evaluation.is_auction,
+            evaluation.is_city_auction,
         )
-        try:
-            raw = _run_llama(model_path, prompt)
-            score, reason = _parse_score(raw)
-            logger.debug("LLM scored '%s' → %d", flat.get("title", "?"), score)
-            return score, reason
-        except Exception:
-            logger.warning("LLM evaluation failed – falling back to rules.")
-
-    # --- deterministic fallback ---
-    return _rule_based_score(flat, criteria)
-
-
-def _rule_based_score(flat: Dict[str, Any], criteria: Dict[str, Any]) -> Tuple[int, str]:
-    """Simple heuristic scoring when no LLM is available."""
-    score = 100
-    reasons = []
-
-    max_price = criteria.get("max_price_czk")
-    if max_price and flat.get("price", 0) > max_price:
-        score -= 40
-        reasons.append(f"price {flat.get('price')} > {max_price}")
-
-    min_bed = criteria.get("min_bedrooms")
-    if min_bed and flat.get("bedrooms", 0) < min_bed:
-        score -= 25
-        reasons.append(f"bedrooms {flat.get('bedrooms', 0)} < {min_bed}")
-
-    min_sqm = criteria.get("min_sqm")
-    if min_sqm and flat.get("sqm", 0) < min_sqm:
-        score -= 25
-        reasons.append(f"sqm {flat.get('sqm', 0)} < {min_sqm}")
-
-    districts = criteria.get("preferred_districts", [])
-    if districts and flat.get("district") not in districts:
-        score -= 10
-        reasons.append(f"district '{flat.get('district')}' not preferred")
-
-    score = max(0, score)
-    reason = "; ".join(reasons) if reasons else "meets all rule-based criteria"
-    return score, reason
+        return evaluation
+    except Exception:
+        logger.exception("LLM evaluation failed for %s", flat.get("url", "?"))
+        return Evaluation(score=0, reason="LLM evaluation failed")

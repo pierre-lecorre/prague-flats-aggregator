@@ -1,23 +1,35 @@
 import asyncio
-import sys
-from typing import List, Dict, Any
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import (
-    SOURCES, DRY_RUN,
-    MIN_SIZE_M2, MAX_PRICE_CZK,
-    COMMUTE_MAX_MINUTES, COMMUTE_TARGET_ADDRESS,
-    OLLAMA_MODEL
+    COMMUTE_MAX_MINUTES,
+    DRY_RUN,
+    MAX_LISTING_AGE_HOURS,
+    MIN_SCORE,
+    OLLAMA_MODEL,
+    USER_CRITERIA,
 )
-from db import init_db, listing_exists, insert_listing, get_new_listings, save_evaluation, mark_listing_inactive
-from evaluator import evaluate_flat, check_flatshare, check_auction
-from notifier import send_telegram_message
-from commute import calculate_commute_time_with_address
+from db import init_db, listing_exists, insert_listing, get_new_listings, save_evaluation
+from evaluator import evaluate_flat
+from notifier import send_telegram_message, send_telegram_alert
+from commute import compute_commute_to_flat
+from scraper_base import ScrapeError
 
 from scraper_ceskereality import CeskeRealityScraper
 from scraper_ulovdomov import UlovDomovScraper
 from scraper_realingo import RealingoScraper
 from scraper_sreality import SrealityScraper
 from scraper_bezrealitky import BezrealitkyScraper
+from scraper_landomo import LandomoScraper
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 SCRAPERS = {
     "ceskereality": CeskeRealityScraper,
@@ -25,132 +37,181 @@ SCRAPERS = {
     "realingo": RealingoScraper,
     "sreality": SrealityScraper,
     "bezrealitky": BezrealitkyScraper,
+    "landomo": LandomoScraper,
 }
 
-# User criteria for LLM evaluation
-USER_CRITERIA = {
-    "max_price_czk": MAX_PRICE_CZK,
-    "min_sqm": MIN_SIZE_M2,
-    "max_commute_minutes": COMMUTE_MAX_MINUTES,
-    "commute_target": COMMUTE_TARGET_ADDRESS,
-    "min_bedrooms": 1,
-    "preferred_districts": [],  # Add preferred Prague districts here if needed
-}
+
+def _parse_listed_at(raw: Optional[str]) -> Optional[datetime]:
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    text = text.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def is_stale(listing: Dict[str, Any]) -> bool:
+    if not MAX_LISTING_AGE_HOURS:
+        return False
+    listed = _parse_listed_at(listing.get("listed_at"))
+    if listed is None:
+        return False
+    return datetime.now(timezone.utc) - listed > timedelta(hours=MAX_LISTING_AGE_HOURS)
+
 
 async def run_scrapers() -> List[Dict[str, Any]]:
-    all_listings = []
-    
+    all_listings: List[Dict[str, Any]] = []
+    failures: List[Tuple[str, Exception]] = []
+
     for source_name, scraper_class in SCRAPERS.items():
-        print(f"Scraping {source_name}...")
+        logger.info("Scraping %s...", source_name)
         scraper = scraper_class()
         try:
             listings = await scraper.scrape()
-            print(f"  Found {len(listings)} listings from {source_name}")
-            
+            logger.info("  Found %d listings from %s", len(listings), source_name)
             for listing in listings:
                 if not listing_exists(listing["id"]):
                     insert_listing(listing)
                     all_listings.append(listing)
                 else:
-                    print(f"  Duplicate: {listing['url']}")
-                    
+                    logger.debug("  Duplicate: %s", listing["url"])
         except Exception as e:
-            print(f"Error scraping {source_name}: {e}")
-    
+            logger.error("Error scraping %s: %s", source_name, e)
+            failures.append((source_name, e))
+
+    if failures:
+        await alert_scraper_failures(failures)
+
     return all_listings
+
+
+async def alert_scraper_failures(failures: List[Tuple[str, Exception]]) -> None:
+    lines = ["<b>⚠️ Scraper failure</b>", ""]
+    for source_name, exc in failures:
+        kind = "empty/broken" if isinstance(exc, ScrapeError) else type(exc).__name__
+        detail = str(exc).replace("<", "&lt;").replace(">", "&gt;")
+        lines.append(f"• <b>{source_name}</b> ({kind}): {detail}")
+    lines.append("")
+    lines.append("Pipeline kept going for other sources.")
+    await send_telegram_alert("\n".join(lines))
+
 
 async def process_new_listings():
     new_listings = get_new_listings()
-    print(f"Processing {len(new_listings)} new listings...")
-    
+    logger.info("Processing %d new listings...", len(new_listings))
+    matches = 0
+
     for listing in new_listings:
-        print(f"Evaluating {listing['url']}...")
-        
-        # Check for flatshare and auctions BEFORE LLM evaluation
-        description = listing.get("description", "")
-        title = listing.get("title", "")
-        
-        is_flatshare = check_flatshare(description, title)
-        is_auction, is_city_auction = check_auction(description, title)
-        
-        # Skip city auctions immediately
-        if is_auction and is_city_auction:
-            print(f"  REJECT: City auction - skipping")
+        logger.info("Evaluating %s...", listing["url"])
+
+        if is_stale(listing):
+            logger.info("  SKIP: older than %sh", MAX_LISTING_AGE_HOURS)
             save_evaluation(
                 listing_id=listing["id"],
                 score=0,
-                reasons="City/municipal auction - ignored",
-                is_flatshare=is_flatshare,
-                is_auction=True,
-                commute_minutes=None
-            )
-            continue
-        
-        # Skip flatshares
-        if is_flatshare:
-            print(f"  REJECT: Flatshare - skipping")
-            save_evaluation(
-                listing_id=listing["id"],
-                score=0,
-                reasons="Flatshare/room rental - ignored",
-                is_flatshare=True,
+                reasons=f"Older than {MAX_LISTING_AGE_HOURS}h",
+                is_flatshare=False,
                 is_auction=False,
-                commute_minutes=None
             )
             continue
-        
-        # Calculate commute time
-        commute_minutes = None
-        if listing.get("latitude") and listing.get("longitude"):
-            commute_minutes = calculate_commute_time_with_address(
-                listing["latitude"], 
-                listing["longitude"], 
-                COMMUTE_TARGET_ADDRESS
-            )
-        
-        # Evaluate with LLM (or fallback)
-        score, reason = evaluate_flat(
+
+        evaluation = evaluate_flat(
             flat=listing,
             criteria=USER_CRITERIA,
-            model_path=OLLAMA_MODEL
+            model_path=OLLAMA_MODEL,
         )
-        
+
+        if evaluation.is_city_auction:
+            logger.info("  REJECT: City auction")
+            save_evaluation(
+                listing_id=listing["id"],
+                score=0,
+                reasons=evaluation.reason or "City/municipal auction - ignored",
+                is_flatshare=evaluation.is_flatshare,
+                is_auction=True,
+            )
+            continue
+
+        if evaluation.is_flatshare:
+            logger.info("  REJECT: Flatshare")
+            save_evaluation(
+                listing_id=listing["id"],
+                score=0,
+                reasons=evaluation.reason or "Flatshare/room rental - ignored",
+                is_flatshare=True,
+                is_auction=evaluation.is_auction,
+            )
+            continue
+
+        if evaluation.is_auction or evaluation.score < MIN_SCORE:
+            why = "auction" if evaluation.is_auction else f"score {evaluation.score} < {MIN_SCORE}"
+            logger.info("  SKIP: %s", why)
+            save_evaluation(
+                listing_id=listing["id"],
+                score=evaluation.score,
+                reasons=evaluation.reason,
+                is_flatshare=evaluation.is_flatshare,
+                is_auction=evaluation.is_auction,
+            )
+            continue
+
+        commute_a, commute_b = compute_commute_to_flat(listing)
         save_evaluation(
             listing_id=listing["id"],
-            score=score,
-            reasons=reason,
-            is_flatshare=is_flatshare,
-            is_auction=is_auction,
-            commute_minutes=commute_minutes
+            score=evaluation.score,
+            reasons=evaluation.reason,
+            is_flatshare=evaluation.is_flatshare,
+            is_auction=evaluation.is_auction,
+            commute_a=commute_a,
+            commute_b=commute_b,
         )
-        
-        # Skip non-city auctions (but not city auctions - those were already skipped)
-        if is_auction:
-            print(f"  Skipping auction (non-city): {listing['url']}")
+
+        if (
+            COMMUTE_MAX_MINUTES
+            and commute_a is not None
+            and commute_b is not None
+            and commute_a > COMMUTE_MAX_MINUTES
+            and commute_b > COMMUTE_MAX_MINUTES
+        ):
+            logger.info(
+                "  SKIP commute: A %.0f and B %.0f > %s min",
+                commute_a,
+                commute_b,
+                COMMUTE_MAX_MINUTES,
+            )
             continue
-        
-        # Send notification for good matches
-        if score >= 60:
-            print(f"  Good match (score: {score}) - sending notification")
-            await send_telegram_message(listing, {
-                "score": score,
-                "reasons": reason,
-                "commute_minutes": commute_minutes
-            })
-        else:
-            print(f"  Low score ({score}) - skipping")
+
+        logger.info("  Match (score %d) — notify", evaluation.score)
+        await send_telegram_message(listing, {
+            "score": evaluation.score,
+            "reasons": evaluation.reason,
+            "commute_a": commute_a,
+            "commute_b": commute_b,
+        })
+        matches += 1
+
+    logger.info("Done — %d new matches.", matches)
+
 
 async def main():
-    print("Initializing database...")
+    if DRY_RUN:
+        logger.info("DRY_RUN is on")
+    logger.info("Initializing database...")
     init_db()
-    
-    print("Running scrapers...")
-    new_listings = await run_scrapers()
-    
-    print("Processing new listings...")
+
+    logger.info("Running scrapers...")
+    await run_scrapers()
+
+    logger.info("Processing new listings...")
     await process_new_listings()
-    
-    print("Done!")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
